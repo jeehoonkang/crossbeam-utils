@@ -9,4 +9,7 @@ homepage = "https://github.com/crossbeam-rs/crossbeam-utils"
 documentation = "https://docs.rs/crossbeam-utils"
 description = "Utilities for concurrent programming"
 
+[features]
+nightly = []
+
 [dependencies]
