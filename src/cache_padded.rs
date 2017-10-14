@@ -4,9 +4,22 @@ use std::mem;
 use std::ops::{Deref, DerefMut};
 use std::ptr;
 
-/// An array of 64 bytes - that is the most common cache line size on modern machines.
-#[cfg_attr(feature = "nightly", repr(align(64)))]
-struct Padding([u8; 64]);
+/// 64 bytes is the most common cache line size on modern machines.
+const CACHE_LINE_BYTES: usize = 64;
+
+#[cfg(not(feature = "nightly"))]
+struct Inner<T> {
+    bytes: [u8; CACHE_LINE_BYTES],
+    _marker: PhantomData<T>,
+}
+
+#[cfg(feature = "nightly")]
+#[repr(align(64))]
+#[allow(unions_with_drop_fields)]
+union Inner<T> {
+    bytes: [u8; CACHE_LINE_BYTES],
+    _value: T,
+}
 
 /// Pads `T` to the length of a cache line.
 ///
@@ -16,8 +29,9 @@ struct Padding([u8; 64]);
 ///
 /// At the moment, cache lines are assumed to be 64 bytes on all architectures.
 /// Note that, while the size of `CachePadded<T>` is 64 bytes, the alignment may not be.
+#[allow(unions_with_drop_fields)]
 pub struct CachePadded<T> {
-    data: Padding,
+    inner: Inner<T>,
 
     /// `[T; 0]` ensures correct alignment.
     /// `PhantomData<T>` signals that `CachePadded<T>` contains a `T`.
@@ -35,7 +49,7 @@ impl<T> CachePadded<T> {
 
         unsafe {
             let mut padded = CachePadded {
-                data: mem::uninitialized(),
+                inner: mem::uninitialized(),
                 _marker: ([], PhantomData),
             };
             let p: *mut T = &mut *padded;
@@ -58,13 +72,13 @@ impl<T> Deref for CachePadded<T> {
     type Target = T;
 
     fn deref(&self) -> &T {
-        unsafe { &*(&self.data as *const _ as *const T) }
+        unsafe { &*(&self.inner.bytes as *const _ as *const T) }
     }
 }
 
 impl<T> DerefMut for CachePadded<T> {
     fn deref_mut(&mut self) -> &mut T {
-        unsafe { &mut *(&mut self.data as *mut _ as *mut T) }
+        unsafe { &mut *(&mut self.inner.bytes as *mut _ as *mut T) }
     }
 }
 
@@ -76,12 +90,18 @@ impl<T: Default> Default for CachePadded<T> {
 
 impl<T: Clone> Clone for CachePadded<T> {
     fn clone(&self) -> Self {
-        let mut new = CachePadded {
-            data: unsafe { mem::uninitialized() },
-            _marker: ([], PhantomData),
-        };
-        new.data.0.copy_from_slice(&self.data.0);
-        new
+        unsafe {
+            let mut new: Self = CachePadded {
+                inner: mem::uninitialized(),
+                _marker: ([], PhantomData),
+            };
+
+            let src: *const T = self.deref();
+            let dest: *mut T = new.deref_mut();
+            ptr::copy_nonoverlapping(src, dest, 1);
+
+            new
+        }
     }
 }
 
@@ -140,10 +160,19 @@ mod test {
         CachePadded::new([17u64; 8]);
     }
 
+    #[cfg(not(feature = "nightly"))]
     #[test]
     #[should_panic]
-    fn too_large() {
+    fn large() {
         CachePadded::new([17u64; 9]);
+    }
+
+    #[cfg(feature = "nightly")]
+    #[test]
+    fn large() {
+        let a = [17u64; 9];
+        let b = CachePadded::new(a);
+        assert!(mem::size_of_val(&a) <= mem::size_of_val(&b));
     }
 
     #[test]
