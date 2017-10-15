@@ -13,3 +13,4 @@ description = "Utilities for concurrent programming"
 nightly = []
 
 [dependencies]
+cfg-if = "0.1"

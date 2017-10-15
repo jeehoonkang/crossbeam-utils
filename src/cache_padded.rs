@@ -1,24 +1,64 @@
 use std::fmt;
-use std::marker::PhantomData;
 use std::mem;
 use std::ops::{Deref, DerefMut};
 use std::ptr;
 
-/// 64 bytes is the most common cache line size on modern machines.
-const CACHE_LINE_BYTES: usize = 64;
+cfg_if! {
+    if #[cfg(feature = "nightly")] {
+        #[derive(Clone)]
+        #[repr(align(64))]
+        struct Inner<T> {
+            value: T,
+        }
 
-#[cfg(not(feature = "nightly"))]
-struct Inner<T> {
-    bytes: [u8; CACHE_LINE_BYTES],
-    _marker: PhantomData<T>,
-}
+        impl<T> Deref for Inner<T> {
+            type Target = T;
 
-#[cfg(feature = "nightly")]
-#[repr(align(64))]
-#[allow(unions_with_drop_fields)]
-union Inner<T> {
-    bytes: [u8; CACHE_LINE_BYTES],
-    _value: T,
+            fn deref(&self) -> &T {
+                &self.value
+            }
+        }
+
+        impl<T> DerefMut for Inner<T> {
+            fn deref_mut(&mut self) -> &mut T {
+                &mut self.value
+            }
+        }
+    } else {
+        use std::marker::PhantomData;
+
+        #[derive(Clone)]
+        struct Inner<T> {
+            bytes: [u8; 64],
+
+            /// `[T; 0]` ensures correct alignment.
+            /// `PhantomData<T>` signals that `CachePadded<T>` contains a `T`.
+            _marker: ([T; 0], PhantomData<T>),
+        }
+
+        impl<T> Deref for Inner<T> {
+            type Target = T;
+
+            fn deref(&self) -> &T {
+                unsafe { &*(self.bytes.as_ptr() as *const T) }
+            }
+        }
+
+        impl<T> DerefMut for Inner<T> {
+            fn deref_mut(&mut self) -> &mut T {
+                unsafe { &mut *(self.bytes.as_ptr() as *mut T) }
+            }
+        }
+
+        impl<T> Drop for CachePadded<T> {
+            fn drop(&mut self) {
+                let p: *mut T = self.deref_mut();
+                unsafe {
+                    ptr::drop_in_place(p);
+                }
+            }
+        }
+    }
 }
 
 /// Pads `T` to the length of a cache line.
@@ -28,14 +68,17 @@ union Inner<T> {
 /// activity. Use this type when you want to *avoid* cache locality.
 ///
 /// At the moment, cache lines are assumed to be 64 bytes on all architectures.
-/// Note that, while the size of `CachePadded<T>` is 64 bytes, the alignment may not be.
-#[allow(unions_with_drop_fields)]
+///
+/// # Size and alignment
+///
+/// By default, the size of `CachePadded<T>` is 64 bytes. If `T` is larger than that, then
+/// `CachePadded::<T>::new` will panic. Alignment of `CachePadded<T>` is the same as that of `T`.
+///
+/// However, if the `nightly` feature is enabled, arbitrarily large types `T` can be stored inside
+/// a `CachePadded<T>`. The size will then be a multiple of 64 at least the size of `T`, and the
+/// alignment will be the maximum of 64 and the alignment of `T`.
 pub struct CachePadded<T> {
     inner: Inner<T>,
-
-    /// `[T; 0]` ensures correct alignment.
-    /// `PhantomData<T>` signals that `CachePadded<T>` contains a `T`.
-    _marker: ([T; 0], PhantomData<T>),
 }
 
 unsafe impl<T: Send> Send for CachePadded<T> {}
@@ -43,6 +86,10 @@ unsafe impl<T: Sync> Sync for CachePadded<T> {}
 
 impl<T> CachePadded<T> {
     /// Pads a value to the length of a cache line.
+    ///
+    /// # Panics
+    ///
+    /// If `nightly` is not enabled and `T` is larger than 64 bytes, this function will panic.
     pub fn new(t: T) -> CachePadded<T> {
         assert!(mem::size_of::<T>() <= mem::size_of::<CachePadded<T>>());
         assert!(mem::align_of::<T>() <= mem::align_of::<CachePadded<T>>());
@@ -50,7 +97,6 @@ impl<T> CachePadded<T> {
         unsafe {
             let mut padded = CachePadded {
                 inner: mem::uninitialized(),
-                _marker: ([], PhantomData),
             };
             let p: *mut T = &mut *padded;
             ptr::write(p, t);
@@ -59,26 +105,17 @@ impl<T> CachePadded<T> {
     }
 }
 
-impl<T> Drop for CachePadded<T> {
-    fn drop(&mut self) {
-        let p: *mut T = &mut **self;
-        unsafe {
-            ptr::drop_in_place(p);
-        }
-    }
-}
-
 impl<T> Deref for CachePadded<T> {
     type Target = T;
 
     fn deref(&self) -> &T {
-        unsafe { &*(&self.inner.bytes as *const _ as *const T) }
+        self.inner.deref()
     }
 }
 
 impl<T> DerefMut for CachePadded<T> {
     fn deref_mut(&mut self) -> &mut T {
-        unsafe { &mut *(&mut self.inner.bytes as *mut _ as *mut T) }
+        self.inner.deref_mut()
     }
 }
 
@@ -90,17 +127,8 @@ impl<T: Default> Default for CachePadded<T> {
 
 impl<T: Clone> Clone for CachePadded<T> {
     fn clone(&self) -> Self {
-        unsafe {
-            let mut new: Self = CachePadded {
-                inner: mem::uninitialized(),
-                _marker: ([], PhantomData),
-            };
-
-            let src: *const T = self.deref();
-            let dest: *mut T = new.deref_mut();
-            ptr::copy_nonoverlapping(src, dest, 1);
-
-            new
+        CachePadded {
+            inner: self.inner.clone(),
         }
     }
 }
@@ -160,19 +188,21 @@ mod test {
         CachePadded::new([17u64; 8]);
     }
 
-    #[cfg(not(feature = "nightly"))]
-    #[test]
-    #[should_panic]
-    fn large() {
-        CachePadded::new([17u64; 9]);
-    }
-
-    #[cfg(feature = "nightly")]
-    #[test]
-    fn large() {
-        let a = [17u64; 9];
-        let b = CachePadded::new(a);
-        assert!(mem::size_of_val(&a) <= mem::size_of_val(&b));
+    cfg_if! {
+        if #[cfg(feature = "nightly")] {
+            #[test]
+            fn large() {
+                let a = [17u64; 9];
+                let b = CachePadded::new(a);
+                assert!(mem::size_of_val(&a) <= mem::size_of_val(&b));
+            }
+        } else {
+            #[test]
+            #[should_panic]
+            fn large() {
+                CachePadded::new([17u64; 9]);
+            }
+        }
     }
 
     #[test]
