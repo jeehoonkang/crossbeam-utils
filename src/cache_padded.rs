@@ -47,7 +47,7 @@ cfg_if! {
         use core::marker::PhantomData;
 
         struct Inner<T> {
-            bytes: [u64; 8],
+            bytes: [u8; 64],
 
             /// `[T; 0]` ensures alignment is at least that of `T`.
             /// `PhantomData<T>` signals that `CachePadded<T>` contains a `T`.
@@ -130,9 +130,7 @@ impl<T> CachePadded<T> {
     ///
     /// If `nightly` is not enabled and `T` is larger than 64 bytes, this function will panic.
     pub fn new(t: T) -> CachePadded<T> {
-        CachePadded::<T> {
-            inner: Inner::new(t)
-        }
+        CachePadded::<T> { inner: Inner::new(t) }
     }
 }
 
@@ -158,9 +156,7 @@ impl<T: Default> Default for CachePadded<T> {
 
 impl<T: Clone> Clone for CachePadded<T> {
     fn clone(&self) -> Self {
-        CachePadded {
-            inner: self.inner.clone(),
-        }
+        CachePadded { inner: self.inner.clone() }
     }
 }
 
@@ -240,7 +236,10 @@ mod test {
 
     #[test]
     fn debug() {
-        assert_eq!(format!("{:?}", CachePadded::new(17u64)), "CachePadded { 17 }");
+        assert_eq!(
+            format!("{:?}", CachePadded::new(17u64)),
+            "CachePadded { 17 }"
+        );
     }
 
     #[test]
