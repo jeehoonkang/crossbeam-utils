@@ -7,7 +7,7 @@ use core::ptr;
 cfg_if! {
     if #[cfg(feature = "nightly")] {
         // This trick allows use to support rustc 1.12.1, which does not support the
-        // #[repr(align(n))] syntax. Using the attribute makes the parses fail over.
+        // #[repr(align(n))] syntax. Using the attribute makes the parser fail over.
         // It is, however, okay to use it within a macro, since it would be parsed
         // in a later stage, but that never occurs due to the cfg_if.
         // TODO(Vtec234): remove this crap when we drop support for 1.12.
@@ -191,14 +191,12 @@ mod test {
         assert_eq!(x.1, 37);
     }
 
-    // An alignment of 64 is only guaranteed on nightly.
-    #[cfg(feature = "nightly")]
     #[test]
     fn distance() {
         let arr = [CachePadded::new(17u8), CachePadded::new(37u8)];
         let a = &*arr[0] as *const u8;
         let b = &*arr[1] as *const u8;
-        assert_eq!(a.wrapping_offset(64), b);
+        assert!(unsafe { a.offset(64) } <= b);
     }
 
     #[test]
