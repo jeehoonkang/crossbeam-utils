@@ -150,8 +150,14 @@ where
 }
 
 pub struct Scope<'a> {
+    /// The list of the deferred functions.
     dtors: RefCell<Option<DtorChain<'a, ()>>>,
+    /// The list of thread join jobs. It contains `Option<thread::Result<()>>`
+    /// (instead of `thread::Result<()>`) because `ScopedJoinHandle` may have
+    /// already called `join()` and used the join result.
     joins: RefCell<Option<DtorChain<'a, Option<thread::Result<()>>>>>,
+    // !Send + !Sync
+    _marker: PhantomData<&'a ()>,
 }
 
 struct DtorChain<'a, T> {
@@ -174,7 +180,7 @@ struct JoinState<T> {
     _marker: PhantomData<T>,
 }
 
-impl<T> JoinState<T> {
+impl<T: Send> JoinState<T> {
     fn new(join_handle: thread::JoinHandle<()>, result: usize) -> JoinState<T> {
         JoinState {
             join_handle: join_handle,
@@ -192,10 +198,11 @@ impl<T> JoinState<T> {
 }
 
 /// A handle to a scoped thread
-pub struct ScopedJoinHandle<'a, T> {
+pub struct ScopedJoinHandle<'a, T: 'a> {
     inner: Rc<RefCell<Option<JoinState<T>>>>,
     thread: thread::Thread,
-    _marker: PhantomData<&'a ()>,
+    // !Send + !Sync
+    _marker: PhantomData<&'a T>,
 }
 
 /// Create a new `scope`, for deferred destructors.
@@ -220,6 +227,7 @@ where
     let mut scope = Scope {
         dtors: RefCell::new(None),
         joins: RefCell::new(None),
+        _marker: PhantomData,
     };
     let ret = f(&mut scope);
     scope.drop_all();
@@ -241,8 +249,9 @@ impl<'a, T> fmt::Debug for ScopedJoinHandle<'a, T> {
 impl<'a> Scope<'a> {
     /// Joins a spawned thread that is not joined yet.
     ///
-    /// Returns `Some(r)` if a thread is joined and `r` is the join result, and
-    /// `None` if there are no unjoined threads.
+    /// If there are no unjoined threads, then `None` is returned. Otherwise, an
+    /// *arbitrary* unjoined thred is picked, and `Some(r)` is returned when `r`
+    /// is the thread's join result.
     ///
     /// # Examples
     ///
@@ -294,7 +303,8 @@ impl<'a> Scope<'a> {
 
     /// Joins all spawned threads that are not joined yet.
     ///
-    /// Returns the vector of join results.
+    /// Returns the vector of the join results of the unjoin threads, which is
+    /// ordered *arbitrarily*.
     ///
     /// # Examples
     ///
@@ -340,7 +350,8 @@ impl<'a> Scope<'a> {
     /// Schedule code to be executed when exiting the scope.
     ///
     /// This is akin to having a destructor on the stack, except that it is
-    /// *guaranteed* to be run.
+    /// *guaranteed* to be run. It is guaranteed that the function is called
+    /// after all the spawned threads are joined.
     pub fn defer<F>(&self, f: F)
     where
         F: FnOnce() + 'a,
@@ -422,6 +433,9 @@ impl<'s, 'a: 's> ScopedThreadBuilder<'s, 'a> {
         F: FnOnce() -> T + Send + 'a,
         T: Send + 'a,
     {
+        // The `Box` constructed below is written only by the spawned thread,
+        // and read by the current thread only after the spawned thread is
+        // joined (`JoinState::join()`). Thus there are no data races.
         let result = Box::into_raw(Box::<T>::new(unsafe { mem::uninitialized() })) as usize;
 
         let join_handle = try!(unsafe {
@@ -450,7 +464,7 @@ impl<'s, 'a: 's> ScopedThreadBuilder<'s, 'a> {
     }
 }
 
-impl<'a, T> ScopedJoinHandle<'a, T> {
+impl<'a, T: Send + 'a> ScopedJoinHandle<'a, T> {
     /// Join the scoped thread, returning the result it produced.
     pub fn join(self) -> thread::Result<T> {
         let state = mem::replace(self.inner.borrow_mut().deref_mut(), None);
