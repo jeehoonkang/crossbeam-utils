@@ -150,14 +150,10 @@ where
 }
 
 pub struct Scope<'a> {
-    /// The list of the deferred functions.
+    /// The list of the deferred functions and thread join jobs.
     dtors: RefCell<Option<DtorChain<'a, ()>>>,
-    /// The list of thread join jobs. It contains `Option<thread::Result<()>>`
-    /// (instead of `thread::Result<()>`) because `ScopedJoinHandle` may have
-    /// already called `join()` and used the join result.
-    joins: RefCell<Option<DtorChain<'a, Option<thread::Result<()>>>>>,
     // !Send + !Sync
-    _marker: PhantomData<&'a ()>,
+    _marker: PhantomData<*const ()>,
 }
 
 struct DtorChain<'a, T> {
@@ -199,9 +195,9 @@ impl<T: Send> JoinState<T> {
 
 /// A handle to a scoped thread
 pub struct ScopedJoinHandle<'a, T: 'a> {
+    // !Send + !Sync
     inner: Rc<RefCell<Option<JoinState<T>>>>,
     thread: thread::Thread,
-    // !Send + !Sync
     _marker: PhantomData<&'a T>,
 }
 
@@ -220,16 +216,19 @@ pub struct ScopedJoinHandle<'a, T: 'a> {
 /// });
 /// // Prints messages in the reverse order written
 /// ```
+///
+/// # Panics
+///
+/// `scoped::scope()` panics if a spawned thread panics but it is not joined inside the scope.
 pub fn scope<'a, F, R>(f: F) -> R
 where
-    F: FnOnce(&mut Scope<'a>) -> R,
+    F: FnOnce(&Scope<'a>) -> R,
 {
     let mut scope = Scope {
         dtors: RefCell::new(None),
-        joins: RefCell::new(None),
         _marker: PhantomData,
     };
-    let ret = f(&mut scope);
+    let ret = f(&scope);
     scope.drop_all();
     ret
 }
@@ -247,101 +246,12 @@ impl<'a, T> fmt::Debug for ScopedJoinHandle<'a, T> {
 }
 
 impl<'a> Scope<'a> {
-    /// Joins a spawned thread that is not joined yet.
-    ///
-    /// If there are no unjoined threads, then `None` is returned. Otherwise, an
-    /// *arbitrary* unjoined thred is picked, and `Some(r)` is returned when `r`
-    /// is the thread's join result.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// let array = [1, 2, 3];
-    ///
-    /// crossbeam_utils::scoped::scope(|scope| {
-    ///     for i in &array {
-    ///         scope.spawn(move || {
-    ///             println!("element: {}", i);
-    ///         });
-    ///     }
-    ///
-    ///     scope.join().unwrap().unwrap();
-    ///     scope.join().unwrap().unwrap();
-    ///     scope.join().unwrap().unwrap();
-    ///     assert!(scope.join().is_none());
-    /// });
-    /// ```
-    ///
-    /// In the presence of any `ScopedJoinHandle`, you should not call `join()`
-    /// because both can take the join results of a scoped thread. In order to
-    /// forbid this case, `join()` requires a mutable reference to `Scope`. As a
-    /// result, e.g. the following code is not type-checked:
-    ///
-    /// ```ignore
-    /// let array = [1, 2, 3];
-    ///
-    /// crossbeam_utils::scoped::scope(|scope| {
-    ///     let handles = array.iter().map(|i| {
-    ///         scope.spawn(move || {
-    ///             println!("element: {}", i);
-    ///         });
-    ///     });
-    ///
-    ///     // compile error! `scope` is already borrowed above.
-    ///     scope.join();
-    /// });
-    /// ```
-    pub fn join(&mut self) -> Option<thread::Result<()>> {
-        while let Some(join) = DtorChain::pop(&mut self.joins.borrow_mut()) {
-            let ret = join.call_box();
-            if ret.is_some() {
-                return ret;
-            }
-        }
-        None
-    }
-
-    /// Joins all spawned threads that are not joined yet.
-    ///
-    /// Returns the vector of the join results of the unjoin threads, which is
-    /// ordered *arbitrarily*.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// let array = [1, 2, 3];
-    ///
-    /// crossbeam_utils::scoped::scope(|scope| {
-    ///     for i in &array {
-    ///         scope.spawn(move || {
-    ///             println!("element: {}", i);
-    ///         });
-    ///     }
-    ///
-    ///     let joins = scope.join_all();
-    ///     assert_eq!(joins.len(), 3);
-    ///     assert!(joins.iter().all(|r| r.is_ok()));
-    /// });
-    /// ```
-    #[cfg(feature = "use_std")]
-    pub fn join_all(&mut self) -> Vec<thread::Result<()>> {
-        let mut res = Vec::new();
-        while let Some(r) = self.join() {
-            res.push(r);
-        }
-        res
-    }
-
     // This method is carefully written in a transactional style, so
     // that it can be called directly and, if any dtor panics, can be
     // resumed in the unwinding this causes. By initially running the
     // method outside of any destructor, we avoid any leakage problems
     // due to @rust-lang/rust#14875.
     fn drop_all(&mut self) {
-        while let Some(join) = DtorChain::pop(&mut self.joins.borrow_mut()) {
-            join.call_box();
-        }
-
         while let Some(dtor) = DtorChain::pop(&mut self.dtors.borrow_mut()) {
             dtor.call_box();
         }
@@ -360,21 +270,6 @@ impl<'a> Scope<'a> {
         *dtors = Some(DtorChain {
             dtor: Box::new(f),
             next: dtors.take().map(Box::new),
-        });
-    }
-
-    /// Schedule code to be executed when exiting the scope.
-    ///
-    /// This is akin to having a destructor on the stack, except that it is
-    /// *guaranteed* to be run.
-    fn defer_join<F>(&self, f: F)
-    where
-        F: FnOnce() -> Option<thread::Result<()>> + 'a,
-    {
-        let mut joins = self.joins.borrow_mut();
-        *joins = Some(DtorChain {
-            dtor: Box::new(f),
-            next: joins.take().map(Box::new),
         });
     }
 
@@ -451,9 +346,11 @@ impl<'s, 'a: 's> ScopedThreadBuilder<'s, 'a> {
         let deferred_handle = Rc::new(RefCell::new(Some(join_state)));
         let my_handle = deferred_handle.clone();
 
-        self.scope.defer_join(move || {
+        self.scope.defer(move || {
             let state = mem::replace(deferred_handle.borrow_mut().deref_mut(), None);
-            state.map(|state| state.join().map(|_| ()))
+            if let Some(state) = state {
+                state.join().unwrap();
+            }
         });
 
         Ok(ScopedJoinHandle {
