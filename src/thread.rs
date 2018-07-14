@@ -129,16 +129,16 @@ impl<T, F: FnOnce() -> T> FnBox<T> for F {
 }
 
 /// Like `std::thread::spawn`, but without the closure bounds.
-pub unsafe fn spawn_unsafe<'a, F>(f: F) -> thread::JoinHandle<()>
+pub unsafe fn spawn_unchecked<'a, F>(f: F) -> thread::JoinHandle<()>
 where
     F: FnOnce() + Send + 'a,
 {
     let builder = thread::Builder::new();
-    builder_spawn_unsafe(builder, f).unwrap()
+    builder_spawn_unchecked(builder, f).unwrap()
 }
 
 /// Like `std::thread::Builder::spawn`, but without the closure bounds.
-pub unsafe fn builder_spawn_unsafe<'a, F>(
+pub unsafe fn builder_spawn_unchecked<'a, F>(
     builder: thread::Builder,
     f: F,
 ) -> io::Result<thread::JoinHandle<()>>
@@ -335,7 +335,7 @@ impl<'s, 'a: 's> ScopedThreadBuilder<'s, 'a> {
         let result = Box::into_raw(Box::<ManuallyDrop<T>>::new(unsafe { mem::uninitialized() })) as usize;
 
         let join_handle = try!(unsafe {
-            builder_spawn_unsafe(self.builder, move || {
+            builder_spawn_unchecked(self.builder, move || {
                 let mut result = Box::from_raw(result as *mut ManuallyDrop<T>);
                 *result = ManuallyDrop::new(f());
                 mem::forget(result);
