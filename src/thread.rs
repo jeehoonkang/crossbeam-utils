@@ -5,7 +5,7 @@
 /// A basic scoped thread:
 ///
 /// ```
-/// crossbeam_utils::scoped::scope(|scope| {
+/// crossbeam_utils::thread::scope(|scope| {
 ///     scope.spawn(|| {
 ///         println!("Hello from a scoped thread!");
 ///     });
@@ -96,7 +96,7 @@
 /// ```
 /// let array = [1, 2, 3];
 ///
-/// crossbeam_utils::scoped::scope(|scope| {
+/// crossbeam_utils::thread::scope(|scope| {
 ///     for i in &array {
 ///         scope.spawn(move || {
 ///             println!("element: {}", i);
@@ -211,7 +211,7 @@ pub struct ScopedJoinHandle<'a, T: 'a> {
 /// Creating and using a scope:
 ///
 /// ```
-/// crossbeam_utils::scoped::scope(|scope| {
+/// crossbeam_utils::thread::scope(|scope| {
 ///     scope.defer(|| println!("Exiting scope"));
 ///     scope.spawn(|| println!("Running child thread in scope"))
 /// });
@@ -220,7 +220,7 @@ pub struct ScopedJoinHandle<'a, T: 'a> {
 ///
 /// # Panics
 ///
-/// `scoped::scope()` panics if a spawned thread panics but it is not joined inside the scope.
+/// `thread::scope()` panics if a spawned thread panics but it is not joined inside the scope.
 pub fn scope<'a, F, R>(f: F) -> R
 where
     F: FnOnce(&Scope<'a>) -> R,
