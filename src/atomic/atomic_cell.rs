@@ -43,20 +43,6 @@ impl<T> AtomicCell<T> {
         }
     }
 
-    /// Returns a raw pointer to the inner value.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use crossbeam_utils::atomic::AtomicCell;
-    ///
-    /// let a = AtomicCell::new(7);
-    /// let ptr = a.as_ptr();
-    /// ```
-    pub fn as_ptr(&self) -> *mut T {
-        self.value.get()
-    }
-
     /// Returns a mutable reference to the inner value.
     ///
     /// # Examples
