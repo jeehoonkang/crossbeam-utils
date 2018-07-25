@@ -632,6 +632,11 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering::SeqCst;
+
+    use super::AtomicCell;
+
     #[test]
     fn is_lock_free() {
         struct UsizeWrap(usize);
@@ -797,22 +802,6 @@ mod tests {
         assert_eq!(a.replace(Foo(2)), Foo(11));
         assert_eq!(a.get(), Foo(52));
 
-        assert_eq!(a.update(|_| Foo(3)), Foo(33));
-        assert_ne!(a.update(|_| Foo(3)).0, 33);
-        assert_eq!(a.update(|_| Foo(44)).0, 44);
-
-        a.set(Foo(0));
-        let mut x = 0;
-        let new = a.update(|_| {
-            if x < 20 {
-                x += 1;
-                a.set(Foo(x));
-            }
-            Foo(0)
-        });
-        assert_eq!(x, 20);
-        assert_eq!(new.0, 0);
-
         a.set(Foo(0));
         assert_eq!(a.compare_and_set(Foo(0), Foo(5)), true);
         assert_eq!(a.get().0, 5);
@@ -836,22 +825,6 @@ mod tests {
         assert_eq!(a.get(), Foo(1));
         assert_eq!(a.replace(Foo(2)), Foo(11));
         assert_eq!(a.get(), Foo(52));
-
-        assert_eq!(a.update(|_| Foo(3)), Foo(33));
-        assert_ne!(a.update(|_| Foo(3)).0, 33);
-        assert_eq!(a.update(|_| Foo(44)).0, 44);
-
-        a.set(Foo(0));
-        let mut x = 0;
-        let new = a.update(|_| {
-            if x < 20 {
-                x += 1;
-                a.set(Foo(x));
-            }
-            Foo(0)
-        });
-        assert_eq!(x, 20);
-        assert_eq!(new.0, 0);
 
         a.set(Foo(0));
         assert_eq!(a.compare_and_set(Foo(0), Foo(5)), true);
