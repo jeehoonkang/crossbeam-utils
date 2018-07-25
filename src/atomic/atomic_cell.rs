@@ -226,9 +226,10 @@ impl<T: Copy + Eq> AtomicCell<T> {
                         return false;
                     }
 
-                    // The compare-exchange operation has failed and didn't store `new`. However,
-                    // `previous` is semantically equal to `current`, although not byte-equal.
-                    // Let's retry with `previous` as the new `current`.
+                    // The compare-exchange operation has failed and didn't store `new`. The
+                    // failure is either spurious, or `previous` was semantically equal to
+                    // `current` but not byte-equal. Let's retry with `previous` as the new
+                    // `current`.
                     current = previous;
                 }
             }
