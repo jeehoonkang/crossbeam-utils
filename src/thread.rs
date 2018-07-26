@@ -117,6 +117,7 @@ use std::rc::Rc;
 use std::thread;
 use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::panic;
 
 #[doc(hidden)]
 trait FnBox<T> {
@@ -161,7 +162,7 @@ pub struct Scope<'a> {
 
 #[derive(Debug, Default)]
 struct ScopeStats {
-    running: AtomicUsize,
+    spawned: AtomicUsize,
     completed: AtomicUsize,
     panicked: AtomicUsize
 }
@@ -314,7 +315,19 @@ impl<'a> Scope<'a> {
     /// Get the count of currently running threads for the scope
     #[inline]
     pub fn running_threads(&self) -> usize {
-        self.stats.running.load(Ordering::SeqCst)
+        loop {
+            let completed1 = self.stats.completed.load(Ordering::SeqCst);
+            let panicked1 = self.stats.panicked.load(Ordering::SeqCst);
+
+            let spawned = self.stats.spawned.load(Ordering::SeqCst);
+
+            let completed2 = self.stats.completed.load(Ordering::SeqCst);
+            let panicked2 = self.stats.panicked.load(Ordering::SeqCst);
+
+            if completed1 == completed2 && panicked1 == panicked2 {
+                return spawned - panicked1 - completed1;
+            }
+        }
     }
 
     /// Get the current total count of completed threads for the scope
@@ -363,14 +376,26 @@ impl<'s, 'a: 's> ScopedThreadBuilder<'s, 'a> {
         let result = Box::into_raw(Box::<ManuallyDrop<T>>::new(unsafe { mem::uninitialized() })) as usize;
 
         let stats = &self.scope.stats;
-        let join_handle = try!(unsafe {
+        let join_handle = unsafe {
             builder_spawn_unchecked(self.builder, move || {
-                let _sentinel = Sentinel::new(stats);
+                stats.spawned.fetch_add(1, Ordering::SeqCst);
+                let res = panic::catch_unwind(panic::AssertUnwindSafe(f));
+
                 let mut result = Box::from_raw(result as *mut ManuallyDrop<T>);
-                *result = ManuallyDrop::new(f());
-                mem::forget(result);
+
+                match res {
+                    Ok(res) => {
+                        stats.completed.fetch_add(1, Ordering::SeqCst);
+                        *result = ManuallyDrop::new(res);
+                        mem::forget(result);
+                    },
+                    Err(err) => {
+                        stats.panicked.fetch_add(1, Ordering::SeqCst);
+                        panic::resume_unwind(err);
+                    }
+                };
             })
-        });
+        }?;
         let thread = join_handle.thread().clone();
 
         let join_state = JoinState::<T>::new(join_handle, result);
@@ -389,36 +414,6 @@ impl<'s, 'a: 's> ScopedThreadBuilder<'s, 'a> {
             thread: thread,
             _marker: PhantomData,
         })
-    }
-}
-
-/// A sentinel for keeping track of a scope's stats
-struct Sentinel<'s> {
-    stats: &'s ScopeStats
-}
-
-impl<'s> Sentinel<'s> {
-    /// Create the sentinel and increase the running count for the scope
-    #[inline]
-    fn new(stats: &'s ScopeStats) -> Self {
-        stats.running.fetch_add(1, Ordering::SeqCst);
-        Self {
-            stats
-        }
-    }
-}
-
-impl<'s> Drop for Sentinel<'s> {
-    /// Decrease the running count for the scope, if the thread is unwinding a panic, increase the
-    /// panicked count, else increase the completed count
-    #[inline]
-    fn drop(&mut self) {
-        self.stats.running.fetch_sub(1, Ordering::SeqCst);
-        if thread::panicking() {
-            self.stats.panicked.fetch_add(1, Ordering::SeqCst);
-        } else {
-            self.stats.completed.fetch_add(1, Ordering::SeqCst);
-        }
     }
 }
 
