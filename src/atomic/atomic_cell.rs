@@ -314,32 +314,6 @@ macro_rules! impl_arithmetic {
                 }
             }
 
-            /// Applies bitwise "nand" to the current value and returns the previous value.
-            ///
-            /// # Examples
-            ///
-            /// ```
-            /// use crossbeam_utils::atomic::AtomicCell;
-            ///
-            #[doc = $example]
-            ///
-            /// assert_eq!(a.fetch_nand(3), 7);
-            /// assert_eq!(a.load(), !3);
-            /// ```
-            #[inline]
-            pub fn fetch_nand(&self, val: $t) -> $t {
-                if can_transmute::<$t, atomic::AtomicUsize>() {
-                    let a = unsafe { &*(self.value.get() as *const atomic::AtomicUsize) };
-                    a.fetch_nand(val as usize, Ordering::SeqCst) as $t
-                } else {
-                    let _lock = lock(self.value.get() as usize);
-                    let value = unsafe { &mut *(self.value.get()) };
-                    let old = *value;
-                    *value = !(*value & val);
-                    old
-                }
-            }
-
             /// Applies bitwise "or" to the current value and returns the previous value.
             ///
             /// # Examples
@@ -453,24 +427,6 @@ macro_rules! impl_arithmetic {
                 a.fetch_and(val, Ordering::SeqCst)
             }
 
-            /// Applies bitwise "nand" to the current value and returns the previous value.
-            ///
-            /// # Examples
-            ///
-            /// ```
-            /// use crossbeam_utils::atomic::AtomicCell;
-            ///
-            #[doc = $example]
-            ///
-            /// assert_eq!(a.fetch_nand(3), 7);
-            /// assert_eq!(a.load(), !3);
-            /// ```
-            #[inline]
-            pub fn fetch_nand(&self, val: $t) -> $t {
-                let a = unsafe { &*(self.value.get() as *const $atomic) };
-                a.fetch_nand(val, Ordering::SeqCst)
-            }
-
             /// Applies bitwise "or" to the current value and returns the previous value.
             ///
             /// # Examples
@@ -555,27 +511,6 @@ impl AtomicCell<bool> {
     pub fn fetch_and(&self, val: bool) -> bool {
         let a = unsafe { &*(self.value.get() as *const AtomicBool) };
         a.fetch_and(val, Ordering::SeqCst)
-    }
-
-    /// Applies logical "nand" to the current value and returns the previous value.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use crossbeam_utils::atomic::AtomicCell;
-    ///
-    /// let a = AtomicCell::new(false);
-    ///
-    /// assert_eq!(a.fetch_nand(false), false);
-    /// assert_eq!(a.load(), true);
-    ///
-    /// assert_eq!(a.fetch_nand(true), true);
-    /// assert_eq!(a.load(), false);
-    /// ```
-    #[inline]
-    pub fn fetch_nand(&self, val: bool) -> bool {
-        let a = unsafe { &*(self.value.get() as *const AtomicBool) };
-        a.fetch_nand(val, Ordering::SeqCst)
     }
 
     /// Applies logical "or" to the current value and returns the previous value.
