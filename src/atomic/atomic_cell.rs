@@ -535,7 +535,7 @@ fn atomic_is_lock_free<T>() -> bool {
 
 /// Atomically reads data from `src`.
 ///
-/// This operation is sequentially consistent. If possible, an atomic instructions is used, and a
+/// This operation uses the `SeqCst` ordering. If possible, an atomic instructions is used, and a
 /// global lock otherwise.
 unsafe fn atomic_load<T>(src: *mut T) -> T
 where
@@ -556,7 +556,7 @@ where
 
 /// Atomically writes `val` to `dst`.
 ///
-/// This operation is sequentially consistent. If possible, an atomic instructions is used, and a
+/// This operation uses the `SeqCst` ordering. If possible, an atomic instructions is used, and a
 /// global lock otherwise.
 unsafe fn atomic_store<T>(dst: *mut T, val: T) {
     atomic! {
@@ -576,7 +576,7 @@ unsafe fn atomic_store<T>(dst: *mut T, val: T) {
 
 /// Atomically swaps data at `dst` with `val`.
 ///
-/// This operation is sequentially consistent. If possible, an atomic instructions is used, and a
+/// This operation uses the `SeqCst` ordering. If possible, an atomic instructions is used, and a
 /// global lock otherwise.
 unsafe fn atomic_swap<T>(dst: *mut T, val: T) -> T {
     atomic! {
@@ -599,7 +599,7 @@ unsafe fn atomic_swap<T>(dst: *mut T, val: T) -> T {
 ///
 /// Returns the old value on success, or the current value at `dst` on failure.
 ///
-/// This operation is sequentially consistent. If possible, an atomic instructions is used, and a
+/// This operation uses the `SeqCst` ordering. If possible, an atomic instructions is used, and a
 /// global lock otherwise.
 unsafe fn atomic_compare_exchange_weak<T>(dst: *mut T, current: T, new: T) -> Result<T, T>
 where
