@@ -53,7 +53,7 @@ impl<T> AtomicCell<T> {
     /// let mut a = AtomicCell::new(7);
     /// *a.get_mut() += 1;
     ///
-    /// assert_eq!(a.get(), 8);
+    /// assert_eq!(a.load(), 8);
     /// ```
     pub fn get_mut(&mut self) -> &mut T {
         unsafe { &mut *self.value.get() }
@@ -116,13 +116,13 @@ impl<T> AtomicCell<T> {
     ///
     /// let a = AtomicCell::new(7);
     ///
-    /// assert_eq!(a.get(), 7);
-    /// a.set(8);
-    /// assert_eq!(a.get(), 8);
+    /// assert_eq!(a.load(), 7);
+    /// a.store(8);
+    /// assert_eq!(a.load(), 8);
     /// ```
-    pub fn set(&self, val: T) {
+    pub fn store(&self, val: T) {
         if mem::needs_drop::<T>() {
-            drop(self.replace(val));
+            drop(self.swap(val));
         } else {
             unsafe {
                 atomic_store(self.value.get(), val);
@@ -139,22 +139,22 @@ impl<T> AtomicCell<T> {
     ///
     /// let a = AtomicCell::new(7);
     ///
-    /// assert_eq!(a.get(), 7);
-    /// assert_eq!(a.replace(8), 7);
-    /// assert_eq!(a.get(), 8);
+    /// assert_eq!(a.load(), 7);
+    /// assert_eq!(a.swap(8), 7);
+    /// assert_eq!(a.load(), 8);
     /// ```
-    pub fn replace(&self, val: T) -> T {
+    pub fn swap(&self, val: T) -> T {
         unsafe { atomic_swap(self.value.get(), val) }
     }
 }
 
 impl<T: Default> AtomicCell<T> {
-    /// Takes the inner value and replaces it with `T::default()`.
+    /// Takes the inner value and swaps it with `T::default()`.
     ///
     /// Note that `atomic_cell.take()` is equivalent to:
     ///
     /// ```ignore
-    /// atomic_cell.replace(T::default())
+    /// atomic_cell.swap(T::default())
     /// ```
     ///
     /// # Examples
@@ -164,17 +164,17 @@ impl<T: Default> AtomicCell<T> {
     ///
     /// let a = AtomicCell::new(7);
     ///
-    /// assert_eq!(a.get(), 7);
+    /// assert_eq!(a.load(), 7);
     /// assert_eq!(a.take(), 7);
-    /// assert_eq!(a.get(), 0);
+    /// assert_eq!(a.load(), 0);
     /// ```
     pub fn take(&self) -> T {
-        self.replace(T::default())
+        self.swap(T::default())
     }
 }
 
 impl<T: Copy> AtomicCell<T> {
-    /// Returns a copy of the inner value.
+    /// Loads a value.
     ///
     /// # Examples
     ///
@@ -183,14 +183,39 @@ impl<T: Copy> AtomicCell<T> {
     ///
     /// let a = AtomicCell::new(7);
     ///
-    /// assert_eq!(a.get(), 7);
+    /// assert_eq!(a.load(), 7);
     /// ```
-    pub fn get(&self) -> T {
+    pub fn load(&self) -> T {
         unsafe { atomic_load(self.value.get()) }
     }
 }
 
 impl<T: Copy + Eq> AtomicCell<T> {
+    /// If the current value equals `current`, stores `new` into the atomic cell.
+    ///
+    /// The return value is always the previous value. If it is equal to `current`, then the value
+    /// was updated.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use crossbeam_utils::atomic::AtomicCell;
+    ///
+    /// let a = AtomicCell::new(1);
+    ///
+    /// assert_eq!(a.compare_exchange(2, 3), Err(1));
+    /// assert_eq!(a.load(), 1);
+    ///
+    /// assert_eq!(a.compare_exchange(1, 2), Ok(1));
+    /// assert_eq!(a.load(), 2);
+    /// ```
+    pub fn compare_and_swap(&self, current: T, new: T) -> T {
+        match self.compare_exchange(current, new) {
+            Ok(v) => v,
+            Err(v) => v,
+        }
+    }
+
     /// If the current value equals `current`, stores `new` into the atomic cell.
     ///
     /// The return value is a result indicating whether the new value was written and containing
@@ -201,22 +226,13 @@ impl<T: Copy + Eq> AtomicCell<T> {
     /// ```
     /// use crossbeam_utils::atomic::AtomicCell;
     ///
-    /// #[derive(Debug, Copy, Clone, Eq)]
-    /// struct Foo(i32);
+    /// let a = AtomicCell::new(1);
     ///
-    /// impl PartialEq for Foo {
-    ///     fn eq(&self, other: &Foo) -> bool {
-    ///         self.0 % 10 == other.0 % 10
-    ///     }
-    /// }
+    /// assert_eq!(a.compare_exchange(2, 3), Err(1));
+    /// assert_eq!(a.load(), 1);
     ///
-    /// let a = AtomicCell::new(Foo(1));
-    ///
-    /// assert_eq!(a.compare_exchange(Foo(2), Foo(3)), Err(Foo(111)));
-    /// assert_eq!(a.get().0, 1);
-    ///
-    /// assert_eq!(a.compare_exchange(Foo(11), Foo(22)), Ok(Foo(111)));
-    /// assert_eq!(a.get().0, 22);
+    /// assert_eq!(a.compare_exchange(1, 2), Ok(1));
+    /// assert_eq!(a.load(), 2);
     /// ```
     pub fn compare_exchange(&self, mut current: T, new: T) -> Result<T, T> {
         loop {
@@ -252,11 +268,11 @@ macro_rules! impl_arithmetic {
             ///
             #[doc = $example]
             ///
-            /// assert_eq!(a.get_add(3), 7);
-            /// assert_eq!(a.get(), 10);
+            /// assert_eq!(a.fetch_add(3), 7);
+            /// assert_eq!(a.load(), 10);
             /// ```
             #[inline]
-            pub fn get_add(&self, val: $t) -> $t {
+            pub fn fetch_add(&self, val: $t) -> $t {
                 if can_transmute::<$t, atomic::AtomicUsize>() {
                     let a = unsafe { &*(self.value.get() as *const atomic::AtomicUsize) };
                     a.fetch_add(val as usize, Ordering::SeqCst) as $t
@@ -280,11 +296,11 @@ macro_rules! impl_arithmetic {
             ///
             #[doc = $example]
             ///
-            /// assert_eq!(a.get_sub(3), 7);
-            /// assert_eq!(a.get(), 4);
+            /// assert_eq!(a.fetch_sub(3), 7);
+            /// assert_eq!(a.load(), 4);
             /// ```
             #[inline]
-            pub fn get_sub(&self, val: $t) -> $t {
+            pub fn fetch_sub(&self, val: $t) -> $t {
                 if can_transmute::<$t, atomic::AtomicUsize>() {
                     let a = unsafe { &*(self.value.get() as *const atomic::AtomicUsize) };
                     a.fetch_sub(val as usize, Ordering::SeqCst) as $t
@@ -311,11 +327,11 @@ macro_rules! impl_arithmetic {
             ///
             #[doc = $example]
             ///
-            /// assert_eq!(a.get_add(3), 7);
-            /// assert_eq!(a.get(), 10);
+            /// assert_eq!(a.fetch_add(3), 7);
+            /// assert_eq!(a.load(), 10);
             /// ```
             #[inline]
-            pub fn get_add(&self, val: $t) -> $t {
+            pub fn fetch_add(&self, val: $t) -> $t {
                 let a = unsafe { &*(self.value.get() as *const $atomic) };
                 a.fetch_add(val, Ordering::SeqCst)
             }
@@ -331,11 +347,11 @@ macro_rules! impl_arithmetic {
             ///
             #[doc = $example]
             ///
-            /// assert_eq!(a.get_sub(3), 7);
-            /// assert_eq!(a.get(), 4);
+            /// assert_eq!(a.fetch_sub(3), 7);
+            /// assert_eq!(a.load(), 4);
             /// ```
             #[inline]
-            pub fn get_sub(&self, val: $t) -> $t {
+            pub fn fetch_sub(&self, val: $t) -> $t {
                 let a = unsafe { &*(self.value.get() as *const $atomic) };
                 a.fetch_sub(val, Ordering::SeqCst)
             }
@@ -377,7 +393,7 @@ impl<T: Default> Default for AtomicCell<T> {
 impl<T: Copy + fmt::Debug> fmt::Debug for AtomicCell<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("AtomicCell")
-            .field("value", &self.get())
+            .field("value", &self.load())
             .finish()
     }
 }
@@ -682,10 +698,10 @@ mod tests {
 
         let a = AtomicCell::new(Foo::new());
 
-        assert_eq!(a.replace(Foo::new()), Foo::new());
+        assert_eq!(a.swap(Foo::new()), Foo::new());
         assert_eq!(CNT.load(SeqCst), 1);
 
-        a.set(Foo::new());
+        a.store(Foo::new());
         assert_eq!(CNT.load(SeqCst), 1);
 
         assert_eq!(a.take(), Foo::new());
@@ -724,11 +740,11 @@ mod tests {
 
         let a = AtomicCell::new(Foo::new(5));
 
-        assert_eq!(a.replace(Foo::new(6)), Foo::new(5));
-        assert_eq!(a.replace(Foo::new(1)), Foo::new(6));
+        assert_eq!(a.swap(Foo::new(6)), Foo::new(5));
+        assert_eq!(a.swap(Foo::new(1)), Foo::new(6));
         assert_eq!(CNT.load(SeqCst), 1);
 
-        a.set(Foo::new(2));
+        a.store(Foo::new(2));
         assert_eq!(CNT.load(SeqCst), 1);
 
         assert_eq!(a.take(), Foo::new(2));
@@ -770,11 +786,11 @@ mod tests {
 
         let a = AtomicCell::new(Foo::new(5));
 
-        assert_eq!(a.replace(Foo::new(6)), Foo::new(5));
-        assert_eq!(a.replace(Foo::new(1)), Foo::new(6));
+        assert_eq!(a.swap(Foo::new(6)), Foo::new(5));
+        assert_eq!(a.swap(Foo::new(1)), Foo::new(6));
         assert_eq!(CNT.load(SeqCst), 1);
 
-        a.set(Foo::new(2));
+        a.store(Foo::new(2));
         assert_eq!(CNT.load(SeqCst), 1);
 
         assert_eq!(a.take(), Foo::new(2));
@@ -800,15 +816,15 @@ mod tests {
 
         let a = AtomicCell::new(Foo(1));
 
-        assert_eq!(a.get(), Foo(1));
-        assert_eq!(a.replace(Foo(2)), Foo(11));
-        assert_eq!(a.get(), Foo(52));
+        assert_eq!(a.load(), Foo(1));
+        assert_eq!(a.swap(Foo(2)), Foo(11));
+        assert_eq!(a.load(), Foo(52));
 
-        a.set(Foo(0));
+        a.store(Foo(0));
         assert_eq!(a.compare_exchange(Foo(0), Foo(5)), Ok(Foo(100)));
-        assert_eq!(a.get().0, 5);
+        assert_eq!(a.load().0, 5);
         assert_eq!(a.compare_exchange(Foo(10), Foo(15)), Ok(Foo(100)));
-        assert_eq!(a.get().0, 15);
+        assert_eq!(a.load().0, 15);
     }
 
     #[test]
@@ -824,14 +840,14 @@ mod tests {
 
         let a = AtomicCell::new(Foo(1));
 
-        assert_eq!(a.get(), Foo(1));
-        assert_eq!(a.replace(Foo(2)), Foo(11));
-        assert_eq!(a.get(), Foo(52));
+        assert_eq!(a.load(), Foo(1));
+        assert_eq!(a.swap(Foo(2)), Foo(11));
+        assert_eq!(a.load(), Foo(52));
 
-        a.set(Foo(0));
+        a.store(Foo(0));
         assert_eq!(a.compare_exchange(Foo(0), Foo(5)), Ok(Foo(100)));
-        assert_eq!(a.get().0, 5);
+        assert_eq!(a.load().0, 5);
         assert_eq!(a.compare_exchange(Foo(10), Foo(15)), Ok(Foo(100)));
-        assert_eq!(a.get().0, 15);
+        assert_eq!(a.load().0, 15);
     }
 }
