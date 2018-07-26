@@ -193,14 +193,15 @@ impl<T: Copy> AtomicCell<T> {
 impl<T: Copy + Eq> AtomicCell<T> {
     /// If the current value equals `current`, stores `new` into the atomic cell.
     ///
-    /// Returns `true` if the value was updated, and `false` otherwise.
+    /// The return value is a result indicating whether the new value was written and containing
+    /// the previous value. On success this value is guaranteed to be equal to `current`.
     ///
     /// # Examples
     ///
     /// ```
     /// use crossbeam_utils::atomic::AtomicCell;
     ///
-    /// #[derive(Copy, Clone, Eq)]
+    /// #[derive(Debug, Copy, Clone, Eq)]
     /// struct Foo(i32);
     ///
     /// impl PartialEq for Foo {
@@ -211,19 +212,19 @@ impl<T: Copy + Eq> AtomicCell<T> {
     ///
     /// let a = AtomicCell::new(Foo(1));
     ///
-    /// assert_eq!(a.compare_and_set(Foo(2), Foo(3)), false);
+    /// assert_eq!(a.compare_exchange(Foo(2), Foo(3)), Err(Foo(111)));
     /// assert_eq!(a.get().0, 1);
     ///
-    /// assert_eq!(a.compare_and_set(Foo(11), Foo(12)), true);
-    /// assert_eq!(a.get().0, 12);
+    /// assert_eq!(a.compare_exchange(Foo(11), Foo(22)), Ok(Foo(111)));
+    /// assert_eq!(a.get().0, 22);
     /// ```
-    pub fn compare_and_set(&self, mut current: T, new: T) -> bool {
+    pub fn compare_exchange(&self, mut current: T, new: T) -> Result<T, T> {
         loop {
             match unsafe { atomic_compare_exchange_weak(self.value.get(), current, new) } {
-                Ok(_) => return true,
+                Ok(_) => return Ok(current),
                 Err(previous) => {
                     if previous != current {
-                        return false;
+                        return Err(previous);
                     }
 
                     // The compare-exchange operation has failed and didn't store `new`. The
@@ -804,9 +805,9 @@ mod tests {
         assert_eq!(a.get(), Foo(52));
 
         a.set(Foo(0));
-        assert_eq!(a.compare_and_set(Foo(0), Foo(5)), true);
+        assert_eq!(a.compare_exchange(Foo(0), Foo(5)), Ok(Foo(100)));
         assert_eq!(a.get().0, 5);
-        assert_eq!(a.compare_and_set(Foo(10), Foo(15)), true);
+        assert_eq!(a.compare_exchange(Foo(10), Foo(15)), Ok(Foo(100)));
         assert_eq!(a.get().0, 15);
     }
 
@@ -828,9 +829,9 @@ mod tests {
         assert_eq!(a.get(), Foo(52));
 
         a.set(Foo(0));
-        assert_eq!(a.compare_and_set(Foo(0), Foo(5)), true);
+        assert_eq!(a.compare_exchange(Foo(0), Foo(5)), Ok(Foo(100)));
         assert_eq!(a.get().0, 5);
-        assert_eq!(a.compare_and_set(Foo(10), Foo(15)), true);
+        assert_eq!(a.compare_exchange(Foo(10), Foo(15)), Ok(Foo(100)));
         assert_eq!(a.get().0, 15);
     }
 }

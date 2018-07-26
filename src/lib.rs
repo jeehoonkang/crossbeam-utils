@@ -6,7 +6,6 @@ extern crate cfg_if;
 #[cfg(feature = "use_std")]
 extern crate core;
 
-pub mod atomic;
 mod cache_padded;
 
 pub mod atomic;
