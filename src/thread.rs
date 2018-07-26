@@ -111,11 +111,12 @@
 use std::cell::RefCell;
 use std::fmt;
 use std::marker::PhantomData;
-use std::mem::{self, ManuallyDrop};
+use std::mem;
 use std::ops::DerefMut;
 use std::rc::Rc;
 use std::thread;
 use std::io;
+use std::ptr::NonNull;
 
 #[doc(hidden)]
 trait FnBox<T> {
@@ -173,23 +174,21 @@ impl<'a, T> DtorChain<'a, T> {
 
 struct JoinState<T> {
     join_handle: thread::JoinHandle<()>,
-    result: usize,
-    _marker: PhantomData<T>,
+    result: ScopedThreadResult<T>
 }
 
 impl<T: Send> JoinState<T> {
-    fn new(join_handle: thread::JoinHandle<()>, result: usize) -> JoinState<T> {
+    fn new(join_handle: thread::JoinHandle<()>, result: ScopedThreadResult<T>) -> JoinState<T> {
         JoinState {
-            join_handle: join_handle,
-            result: result,
-            _marker: PhantomData,
+            join_handle,
+            result
         }
     }
 
     fn join(self) -> thread::Result<T> {
         let result = self.result;
         self.join_handle.join().map(|_| {
-            unsafe { ManuallyDrop::into_inner(*Box::from_raw(result as *mut ManuallyDrop<T>))}
+            unsafe { result.into_inner().unwrap() }
         })
     }
 }
@@ -329,18 +328,17 @@ impl<'s, 'a: 's> ScopedThreadBuilder<'s, 'a> {
         F: FnOnce() -> T + Send + 'a,
         T: Send + 'a,
     {
-        // The `Box` constructed below is written only by the spawned thread,
-        // and read by the current thread only after the spawned thread is
-        // joined (`JoinState::join()`). Thus there are no data races.
-        let result = Box::into_raw(Box::<ManuallyDrop<T>>::new(unsafe { mem::uninitialized() })) as usize;
-
-        let join_handle = try!(unsafe {
+        // The `ScopedThreadResult` internally allocates an `Option::None` result in a `Box` which
+        // is unsafely shared with the spawned thread. This is sound, however, since the pointer can
+        // only be written to by the thread and only be read/returned, after the spawned thread is
+        // joined (`JoinState::join()`), so no data races are possible.
+        let result = ScopedThreadResult::new();
+        let mut thread_result = result.clone();
+        let join_handle = unsafe {
             builder_spawn_unchecked(self.builder, move || {
-                let mut result = Box::from_raw(result as *mut ManuallyDrop<T>);
-                *result = ManuallyDrop::new(f());
-                mem::forget(result);
+                thread_result.set(f());
             })
-        });
+        }?;
         let thread = join_handle.thread().clone();
 
         let join_state = JoinState::<T>::new(join_handle, result);
@@ -378,5 +376,55 @@ impl<'a, T: Send + 'a> ScopedJoinHandle<'a, T> {
 impl<'a> Drop for Scope<'a> {
     fn drop(&mut self) {
         self.drop_all()
+    }
+}
+
+unsafe impl<T> Send for ScopedThreadResult<T> where T: Send {}
+unsafe impl<T> Sync for ScopedThreadResult<T> where T: Send {}
+
+/// This struct wraps a raw pointer that can be shared with a scoped thread due to the struct
+/// implementing Send & Sync. This is only safe to use with scoped threads.
+#[derive(Debug)]
+struct ScopedThreadResult<T> {
+    pointer: NonNull<Option<T>>
+}
+
+///`Clone` can not be derived because T must not have `Clone` bound.
+impl<T> Clone for ScopedThreadResult<T> {
+    #[inline]
+    fn clone(&self) -> Self {
+        Self {
+            pointer: self.pointer
+        }
+    }
+}
+
+impl<T> ScopedThreadResult<T> where T: Send {
+    /// Allocates an `Option::None` result in a `Box` and stores the raw pointer
+    #[inline]
+    fn new() -> Self {
+        Self {
+            pointer: unsafe { NonNull::new_unchecked(Box::into_raw(Box::new(None))) }
+        }
+    }
+
+    /// Moves the stored result out of the struct and deallocates the `Box`
+    #[inline]
+    unsafe fn into_inner(self) -> Option<T> {
+        *Box::from_raw(self.pointer.as_ptr())
+    }
+
+    /// Sets the result to the specified argument
+    #[inline]
+    unsafe fn set(&mut self, result: T) {
+        *self.pointer.as_mut() = Some(result);
+    }
+}
+
+/// Deallocates in case of a panic
+impl<T> Drop for ScopedThreadResult<T> {
+    #[inline]
+    fn drop(&mut self) {
+        let _ = Box::from(self.pointer.as_ptr());
     }
 }
