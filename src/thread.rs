@@ -159,23 +159,9 @@ where
 
 pub struct Scope<'env> {
     /// The list of the deferred functions and thread join jobs.
-    dtors: RefCell<Option<DtorChain<'env, thread::Result<()>>>>,
+    dtors: RefCell<Vec<Box<FnBox<thread::Result<()>> + 'env>>>,
     // !Send + !Sync
     _marker: PhantomData<*const ()>,
-}
-
-struct DtorChain<'env, T> {
-    dtor: Box<FnBox<T> + 'env>,
-    next: Option<Box<DtorChain<'env, T>>>,
-}
-
-impl<'env, T> DtorChain<'env, T> {
-    pub fn pop(chain: &mut Option<DtorChain<'env, T>>) -> Option<Box<FnBox<T> + 'env>> {
-        chain.take().map(|mut node| {
-            *chain = node.next.take().map(|b| *b);
-            node.dtor
-        })
-    }
 }
 
 struct JoinState<T> {
@@ -237,7 +223,7 @@ where
     F: FnOnce(&Scope<'env>) -> R,
 {
     let mut scope = Scope {
-        dtors: RefCell::new(None),
+        dtors: RefCell::new(Vec::new()),
         _marker: PhantomData,
     };
     let ret = f(&scope);
@@ -262,9 +248,13 @@ impl<'env> Scope<'env> {
     // and, if any dtor panics, can be resumed in the unwinding this causes. By initially running
     // the method outside of any destructor, we avoid any leakage problems due to
     // @rust-lang/rust#14875.
+    //
+    // FIXME(jeehoonkang): @rust-lang/rust#14875 is fixed, so maybe we can remove the above comment.
+    // But I'd like to write tests to check it before removing the comment.
     fn drop_all(&mut self) -> thread::Result<()> {
         let mut ret = Ok(());
-        while let Some(dtor) = DtorChain::pop(&mut self.dtors.borrow_mut()) {
+        let mut dtors = self.dtors.borrow_mut();
+        for dtor in dtors.drain(..) {
             ret = ret.and(dtor.call_box());
         }
         ret
@@ -274,11 +264,7 @@ impl<'env> Scope<'env> {
     where
         F: (FnOnce() -> thread::Result<()>) + 'env,
     {
-        let mut dtors = self.dtors.borrow_mut();
-        *dtors = Some(DtorChain {
-            dtor: Box::new(f),
-            next: dtors.take().map(Box::new),
-        });
+        self.dtors.borrow_mut().push(Box::new(f));
     }
 
     /// Schedule code to be executed when exiting the scope.
@@ -407,8 +393,11 @@ impl<'scope, T> ScopedJoinHandle<'scope, T> {
 
 impl<'env> Drop for Scope<'env> {
     fn drop(&mut self) {
-        // Actually, there should be no deferred functions left to be run.
-        self.drop_all().unwrap();
+        // Note that `self.dtors` can be non-empty when the code inside a `scope()` panics and
+        // `drop()` is called in unwinding. Even if it's the case, we will join the unjoined threads
+        // and execute the deferred functions. We ignore panics from any threads or functions
+        // because we're in course of unwinding anyway.
+        let _ = self.drop_all();
     }
 }
 
