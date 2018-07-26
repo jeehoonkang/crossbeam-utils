@@ -112,7 +112,6 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::mem::{self, ManuallyDrop};
 use std::ops::DerefMut;
-use std::panic::{self, AssertUnwindSafe};
 use std::rc::Rc;
 use std::thread;
 use std::io;
@@ -157,7 +156,7 @@ where
 }
 
 pub struct Scope<'env> {
-    /// The list of the deferred functions and thread join jobs.
+    /// The list of the thread join jobs.
     dtors: RefCell<Option<DtorChain<'env, thread::Result<()>>>>,
     // !Send + !Sync
     _marker: PhantomData<*const ()>,
@@ -200,7 +199,7 @@ impl<T> JoinState<T> {
     }
 }
 
-/// A handle to a scoped thread
+/// A handle to a scoped thread.
 pub struct ScopedJoinHandle<'scope, T: 'scope> {
     // !Send + !Sync
     inner: Rc<RefCell<Option<JoinState<T>>>>,
@@ -211,16 +210,15 @@ pub struct ScopedJoinHandle<'scope, T: 'scope> {
 unsafe impl<'scope, T> Send for ScopedJoinHandle<'scope, T> {}
 unsafe impl<'scope, T> Sync for ScopedJoinHandle<'scope, T> {}
 
-/// Create a new `Scope` for [*scoped thread spawning*](struct.Scope.html#method.spawn).
+/// Creates a new `Scope` for [*scoped thread spawning*](struct.Scope.html#method.spawn).
 ///
-/// In addition, you can [register ad-hoc functions](struct.Scope.html#method.defer) that are
-/// deferred to be run. No matter what happens, before the `Scope` is dropped, it is guaranteed that
-/// all the unjoined spawned scoped threads are joined and the deferred functions are run.
+/// Before the `Scope` is dropped, it is guaranteed that all the unjoined spawned scoped threads
+/// are joined.
 ///
-/// `thread::scope()` returns `Ok(())` if all the unjoined spawned threads and the deferred
-/// functions did not panic. It returns `Err(e)` if one of them panics with `e`. If many of them
-/// panics, it is still guaranteed that all the threads are joined and all the functions are run,
-/// and `thread::scope()` returns `Err(e)` with `e` from a panicking thread or function.
+/// `thread::scope()` returns `Ok(())` if all the unjoined spawned threads did not panic. It
+/// returns `Err(e)` if one of them panics with `e`. If many of them panics, it is still guaranteed
+/// that all the threads are joined, and `thread::scope()` returns `Err(e)` with `e` from a
+/// panicking thread.
 ///
 /// # Examples
 ///
@@ -228,10 +226,9 @@ unsafe impl<'scope, T> Sync for ScopedJoinHandle<'scope, T> {}
 ///
 /// ```
 /// crossbeam_utils::thread::scope(|scope| {
-///     scope.defer(|| println!("Exiting scope"));
+///     scope.spawn(|| println!("Exiting scope"));
 ///     scope.spawn(|| println!("Running child thread in scope"));
 /// }).unwrap();
-/// // Prints messages
 /// ```
 pub fn scope<'env, F, R>(f: F) -> thread::Result<R>
 where
@@ -271,7 +268,7 @@ impl<'env> Scope<'env> {
         ret
     }
 
-    fn defer_inner<F>(&self, f: F)
+    fn defer<F>(&self, f: F)
     where
         F: (FnOnce() -> thread::Result<()>) + 'env,
     {
@@ -280,17 +277,6 @@ impl<'env> Scope<'env> {
             dtor: Box::new(f),
             next: dtors.take().map(Box::new),
         });
-    }
-
-    /// Schedule code to be executed when exiting the scope.
-    ///
-    /// This is akin to having a destructor on the stack, except that it is *guaranteed* to be
-    /// run. It is guaranteed that the function is called after all the spawned threads are joined.
-    pub fn defer<F>(&self, f: F)
-    where
-        F: FnOnce() + 'env,
-    {
-        self.defer_inner(move || panic::catch_unwind(AssertUnwindSafe(f)));
     }
 
     /// Create a scoped thread.
@@ -367,7 +353,7 @@ impl<'scope, 'env: 'scope> ScopedThreadBuilder<'scope, 'env> {
         let deferred_handle = Rc::new(RefCell::new(Some(join_state)));
         let my_handle = deferred_handle.clone();
 
-        self.scope.defer_inner(move || {
+        self.scope.defer(move || {
             let state = mem::replace(deferred_handle.borrow_mut().deref_mut(), None);
             if let Some(state) = state {
                 state.join().map(|_| ())
@@ -411,7 +397,6 @@ impl<'scope, T> ScopedJoinHandle<'scope, T> {
 
 impl<'env> Drop for Scope<'env> {
     fn drop(&mut self) {
-        // Actually, there should be no deferred functions left to be run.
         self.drop_all().unwrap();
     }
 }
