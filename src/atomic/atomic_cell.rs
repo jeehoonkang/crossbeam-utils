@@ -148,31 +148,6 @@ impl<T> AtomicCell<T> {
     }
 }
 
-impl<T: Default> AtomicCell<T> {
-    /// Takes the inner value and swaps it with `T::default()`.
-    ///
-    /// Note that `atomic_cell.take()` is equivalent to:
-    ///
-    /// ```ignore
-    /// atomic_cell.swap(T::default())
-    /// ```
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use crossbeam_utils::atomic::AtomicCell;
-    ///
-    /// let a = AtomicCell::new(7);
-    ///
-    /// assert_eq!(a.load(), 7);
-    /// assert_eq!(a.take(), 7);
-    /// assert_eq!(a.load(), 0);
-    /// ```
-    pub fn take(&self) -> T {
-        self.swap(T::default())
-    }
-}
-
 impl<T: Copy> AtomicCell<T> {
     /// Loads a value.
     ///
@@ -704,7 +679,7 @@ mod tests {
         a.store(Foo::new());
         assert_eq!(CNT.load(SeqCst), 1);
 
-        assert_eq!(a.take(), Foo::new());
+        assert_eq!(a.swap(Foo::default()), Foo::new());
         assert_eq!(CNT.load(SeqCst), 1);
 
         drop(a);
@@ -747,10 +722,10 @@ mod tests {
         a.store(Foo::new(2));
         assert_eq!(CNT.load(SeqCst), 1);
 
-        assert_eq!(a.take(), Foo::new(2));
+        assert_eq!(a.swap(Foo::default()), Foo::new(2));
         assert_eq!(CNT.load(SeqCst), 1);
 
-        assert_eq!(a.take(), Foo::new(0));
+        assert_eq!(a.swap(Foo::default()), Foo::new(0));
         assert_eq!(CNT.load(SeqCst), 1);
 
         drop(a);
@@ -793,10 +768,10 @@ mod tests {
         a.store(Foo::new(2));
         assert_eq!(CNT.load(SeqCst), 1);
 
-        assert_eq!(a.take(), Foo::new(2));
+        assert_eq!(a.swap(Foo::default()), Foo::new(2));
         assert_eq!(CNT.load(SeqCst), 1);
 
-        assert_eq!(a.take(), Foo::new(0));
+        assert_eq!(a.swap(Foo::default()), Foo::new(0));
         assert_eq!(CNT.load(SeqCst), 1);
 
         drop(a);
