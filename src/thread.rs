@@ -116,7 +116,7 @@ use std::ops::DerefMut;
 use std::rc::Rc;
 use std::thread;
 use std::io;
-use std::ptr::NonNull;
+use std::sync::{Arc, Mutex};
 
 #[doc(hidden)]
 trait FnBox<T> {
@@ -188,7 +188,7 @@ impl<T: Send> JoinState<T> {
     fn join(self) -> thread::Result<T> {
         let result = self.result;
         self.join_handle.join().map(|_| {
-            unsafe { result.into_inner().unwrap() }
+            result.lock().unwrap().take().unwrap()
         })
     }
 }
@@ -328,17 +328,15 @@ impl<'s, 'a: 's> ScopedThreadBuilder<'s, 'a> {
         F: FnOnce() -> T + Send + 'a,
         T: Send + 'a,
     {
-        // The `ScopedThreadResult` internally allocates an `Option::None` result in a `Box` which
-        // is unsafely shared with the spawned thread. This is sound, however, since the pointer can
-        // only be written to by the thread and only be read/returned, after the spawned thread is
-        // joined (`JoinState::join()`), so no data races are possible.
-        let result = ScopedThreadResult::new();
-        let mut thread_result = result.clone();
+        let result = Arc::new(Mutex::new(None));
+
         let join_handle = unsafe {
+            let mut thread_result = Arc::clone(&result);
             builder_spawn_unchecked(self.builder, move || {
-                thread_result.set(f());
+                *thread_result.lock().unwrap() = Some(f());
             })
         }?;
+
         let thread = join_handle.thread().clone();
 
         let join_state = JoinState::<T>::new(join_handle, result);
@@ -346,7 +344,7 @@ impl<'s, 'a: 's> ScopedThreadBuilder<'s, 'a> {
         let my_handle = deferred_handle.clone();
 
         self.scope.defer(move || {
-            let state = mem::replace(deferred_handle.borrow_mut().deref_mut(), None);
+            let state = deferred_handle.borrow_mut().deref_mut().take();
             if let Some(state) = state {
                 state.join().unwrap();
             }
@@ -363,7 +361,7 @@ impl<'s, 'a: 's> ScopedThreadBuilder<'s, 'a> {
 impl<'a, T: Send + 'a> ScopedJoinHandle<'a, T> {
     /// Join the scoped thread, returning the result it produced.
     pub fn join(self) -> thread::Result<T> {
-        let state = mem::replace(self.inner.borrow_mut().deref_mut(), None);
+        let state = self.inner.borrow_mut().deref_mut().take();
         state.unwrap().join()
     }
 
@@ -379,52 +377,4 @@ impl<'a> Drop for Scope<'a> {
     }
 }
 
-unsafe impl<T> Send for ScopedThreadResult<T> where T: Send {}
-unsafe impl<T> Sync for ScopedThreadResult<T> where T: Send {}
-
-/// This struct wraps a raw pointer that can be shared with a scoped thread due to the struct
-/// implementing Send & Sync. This is only safe to use with scoped threads.
-#[derive(Debug)]
-struct ScopedThreadResult<T> {
-    pointer: NonNull<Option<T>>
-}
-
-///`Clone` can not be derived because T must not have `Clone` bound.
-impl<T> Clone for ScopedThreadResult<T> {
-    #[inline]
-    fn clone(&self) -> Self {
-        Self {
-            pointer: self.pointer
-        }
-    }
-}
-
-impl<T> ScopedThreadResult<T> where T: Send {
-    /// Allocates an `Option::None` result in a `Box` and stores the raw pointer
-    #[inline]
-    fn new() -> Self {
-        Self {
-            pointer: unsafe { NonNull::new_unchecked(Box::into_raw(Box::new(None))) }
-        }
-    }
-
-    /// Moves the stored result out of the struct and deallocates the `Box`
-    #[inline]
-    unsafe fn into_inner(self) -> Option<T> {
-        *Box::from_raw(self.pointer.as_ptr())
-    }
-
-    /// Sets the result to the specified argument
-    #[inline]
-    unsafe fn set(&mut self, result: T) {
-        *self.pointer.as_mut() = Some(result);
-    }
-}
-
-/// Deallocates in case of a panic
-impl<T> Drop for ScopedThreadResult<T> {
-    #[inline]
-    fn drop(&mut self) {
-        let _ = Box::from(self.pointer.as_ptr());
-    }
-}
+type ScopedThreadResult<T> = Arc<Mutex<Option<T>>>;
