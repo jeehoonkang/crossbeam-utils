@@ -402,3 +402,85 @@ impl<'env> Drop for Scope<'env> {
 }
 
 type ScopedThreadResult<T> = Arc<Mutex<Option<T>>>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{thread, time};
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+
+    const TIMES: usize = 10;
+    const SMALL_STACK_SIZE: usize = 20;
+
+    #[test]
+    fn join() {
+        let counter = AtomicUsize::new(0);
+        scope(|scope| {
+            let handle = scope.spawn(|| {
+                counter.store(1, Ordering::Relaxed);
+            });
+            assert!(handle.join().is_ok());
+
+            let panic_handle = scope.spawn(|| {
+                panic!("\"My honey is running out!\", said Pooh.");
+            });
+            assert!(panic_handle.join().is_err());
+        }).unwrap();
+    }
+
+    #[test]
+    fn counter() {
+        let counter = AtomicUsize::new(0);
+        scope(|scope| {
+            for _ in 0..TIMES {
+                scope.spawn(|| {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                });
+            }
+        }).unwrap();
+        assert_eq!(TIMES, counter.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn counter_builder() {
+        let counter = AtomicUsize::new(0);
+        scope(|scope| {
+            for i in 0..TIMES {
+                scope.builder()
+                    .name(format!("child-{}", i))
+                    .stack_size(SMALL_STACK_SIZE)
+                    .spawn(|| {
+                        counter.fetch_add(1, Ordering::Relaxed);
+                    })
+                    .unwrap();
+            }
+        }).unwrap();
+        assert_eq!(TIMES, counter.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn counter_defer_panic() {
+        let counter = AtomicUsize::new(0);
+        let result = scope(|scope| {
+            scope.spawn(|| {
+                panic!("\"My honey is running out!\", said Pooh.");
+            });
+            thread::sleep(time::Duration::from_millis(100));
+
+            for _ in 0..TIMES {
+                scope.defer(|| {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                });
+            }
+
+            for _ in 0..TIMES {
+                scope.spawn(|| {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                });
+            }
+        });
+        assert_eq!(TIMES + TIMES, counter.load(Ordering::Relaxed));
+        assert!(result.is_err());
+    }
+}
