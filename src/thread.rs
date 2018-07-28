@@ -177,11 +177,6 @@ struct ScopeStats {
     panicked: AtomicUsize
 }
 
-struct DtorChain<'a, T> {
-    dtor: Box<FnBox<T> + 'a>,
-    next: Option<Box<DtorChain<'a, T>>>,
-}
-
 impl<'env, T> DtorChain<'env, T> {
     pub fn pop(chain: &mut Option<DtorChain<'env, T>>) -> Option<Box<FnBox<T> + 'env>> {
         chain.take().map(|mut node| {
