@@ -129,10 +129,10 @@ impl<T, F: FnOnce() -> T> FnBox<T> for F {
 }
 
 /// Like `std::thread::spawn`, but without lifetime bounds on the closure.
-pub unsafe fn spawn_unchecked<'a, F, T>(f: F) -> thread::JoinHandle<T>
+pub unsafe fn spawn_unchecked<'env, F, T>(f: F) -> thread::JoinHandle<T>
 where
     F: FnOnce() -> T,
-    F: Send + 'a,
+    F: Send + 'env,
     T: Send + 'static,
 {
     let builder = thread::Builder::new();
@@ -140,17 +140,17 @@ where
 }
 
 /// Like `std::thread::Builder::spawn`, but without lifetime bounds on the closure.
-pub unsafe fn builder_spawn_unchecked<'a, F, T>(
+pub unsafe fn builder_spawn_unchecked<'env, F, T>(
     builder: thread::Builder,
     f: F,
 ) -> io::Result<thread::JoinHandle<T>>
 where
     F: FnOnce() -> T,
-    F: Send + 'a,
+    F: Send + 'env,
     T: Send + 'static,
 {
-    let closure: Box<FnBox<T> + 'a> = Box::new(f);
-    let closure: Box<FnBox<T> + Send> = mem::transmute(closure);
+    let closure: Box<FnBox<T> + Send + 'env> = Box::new(f);
+    let closure: Box<FnBox<T> + Send + 'static> = mem::transmute(closure);
     builder.spawn(move || {
         closure.call_box()
     })
@@ -304,6 +304,7 @@ impl<'env> Scope<'env> {
     /// [spawn]: http://doc.rust-lang.org/std/thread/fn.spawn.html
     pub fn spawn<'scope, F, T>(&'scope self, f: F) -> ScopedJoinHandle<'scope, T>
     where
+        'env: 'scope,
         F: FnOnce() -> T,
         F: Send + 'env,
         T: Send + 'env,
@@ -313,7 +314,10 @@ impl<'env> Scope<'env> {
 
     /// Generates the base configuration for spawning a scoped thread, from which configuration
     /// methods can be chained.
-    pub fn builder<'scope>(&'scope self) -> ScopedThreadBuilder<'scope, 'env> {
+    pub fn builder<'scope>(&'scope self) -> ScopedThreadBuilder<'scope, 'env>
+    where
+        'env: 'scope
+    {
         ScopedThreadBuilder {
             scope: self,
             builder: thread::Builder::new(),
