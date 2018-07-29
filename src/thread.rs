@@ -229,7 +229,7 @@ where
     let result = panic::catch_unwind(panic::AssertUnwindSafe(|| f(&scope)));
 
     // Joins all the threads.
-    scope.drop_all();
+    scope.join_all();
     let panic = scope.panics.borrow_mut().pop();
 
     // If any of the threads panicked, returns the panic's payload.
@@ -255,13 +255,13 @@ impl<'scope, T> fmt::Debug for ScopedJoinHandle<'scope, T> {
 
 impl<'env> Scope<'env> {
     // This method is carefully written in a transactional style, so that it can be called directly
-    // and, if any dtor panics, can be resumed in the unwinding this causes. By initially running
-    // the method outside of any destructor, we avoid any leakage problems due to
+    // and, if any thread join panics, can be resumed in the unwinding this causes. By initially
+    // running the method outside of any destructor, we avoid any leakage problems due to
     // @rust-lang/rust#14875.
     //
     // FIXME(jeehoonkang): @rust-lang/rust#14875 is fixed, so maybe we can remove the above comment.
     // But I'd like to write tests to check it before removing the comment.
-    fn drop_all(&mut self) {
+    fn join_all(&mut self) {
         let mut joins = self.joins.borrow_mut();
         for join in joins.drain(..) {
             let result = join.call_box();
@@ -386,12 +386,12 @@ impl<'scope, T> ScopedJoinHandle<'scope, T> {
 
 impl<'env> Drop for Scope<'env> {
     fn drop(&mut self) {
-        // Note that `self.dtors` can be non-empty when the code inside a `scope()` panics and
+        // Note that `self.joins` can be non-empty when the code inside a `scope()` panics and
         // `drop()` is called in unwinding. Even if it's the case, we will join the unjoined
         // threads.
         //
         // We ignore panics from any threads because we're in course of unwinding anyway.
-        self.drop_all();
+        self.join_all();
     }
 }
 
