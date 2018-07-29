@@ -158,7 +158,7 @@ where
 pub struct Scope<'env> {
     /// The list of the thread join jobs.
     joins: RefCell<Vec<Box<FnBox<thread::Result<()>> + 'env>>>,
-    /// Thread and function panics invoked so far.
+    /// Thread panics invoked so far.
     panics: RefCell<Vec<Box<Any + Send + 'static>>>,
     // !Send + !Sync
     _marker: PhantomData<*const ()>,
@@ -196,15 +196,14 @@ pub struct ScopedJoinHandle<'scope, T: 'scope> {
 unsafe impl<'scope, T> Send for ScopedJoinHandle<'scope, T> {}
 unsafe impl<'scope, T> Sync for ScopedJoinHandle<'scope, T> {}
 
-/// Create a new `Scope` for [*scoped thread spawning*](struct.Scope.html#method.spawn).
+/// Creates a new `Scope` for [*scoped thread spawning*](struct.Scope.html#method.spawn).
 ///
 /// No matter what happens, before the `Scope` is dropped, it is guaranteed that all the unjoined
 /// spawned scoped threads are joined.
 ///
 /// `thread::scope()` returns `Ok(())` if all the unjoined spawned threads did not panic. It returns
-/// `Err(e)` if one of them panics with `e`. If many of them panics, it is still guaranteed that all
-/// the threads are joined and all the functions are run, and `thread::scope()` returns `Err(e)`
-/// with `e` from a panicking thread or function.
+/// `Err(e)` if one of them panics with `e`. If many of them panic, it is still guaranteed that all
+/// the threads are joined, and `thread::scope()` returns `Err(e)` with `e` from a panicking thread.
 ///
 /// # Examples
 ///
@@ -212,9 +211,9 @@ unsafe impl<'scope, T> Sync for ScopedJoinHandle<'scope, T> {}
 ///
 /// ```
 /// crossbeam_utils::thread::scope(|scope| {
+///     scope.spawn(|| println!("Exiting scope"));
 ///     scope.spawn(|| println!("Running child thread in scope"));
 /// }).unwrap();
-/// // Prints messages
 /// ```
 pub fn scope<'env, F, R>(f: F) -> thread::Result<R>
 where
@@ -233,7 +232,7 @@ where
     scope.drop_all();
     let panic = scope.panics.borrow_mut().pop();
 
-    // If any of the functions and threads panicked, returns the panic's payload.
+    // If any of the threads panicked, returns the panic's payload.
     if let Some(payload) = panic {
         return Err(payload);
     }
@@ -391,8 +390,7 @@ impl<'env> Drop for Scope<'env> {
         // `drop()` is called in unwinding. Even if it's the case, we will join the unjoined
         // threads.
         //
-        // We ignore panics from any threads or functions because we're in course of unwinding
-        // anyway.
+        // We ignore panics from any threads because we're in course of unwinding anyway.
         self.drop_all();
     }
 }
