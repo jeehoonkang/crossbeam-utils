@@ -113,7 +113,7 @@ use std::io;
 use std::marker::PhantomData;
 use std::mem;
 use std::ops::DerefMut;
-use std::panic::{self, AssertUnwindSafe};
+use std::panic;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -158,8 +158,6 @@ where
 pub struct Scope<'env> {
     /// The list of the thread join jobs.
     joins: RefCell<Vec<Box<FnBox<thread::Result<()>> + 'env>>>,
-    /// The list of the deferred functions.
-    funcs: RefCell<Vec<Box<FnBox<()> + 'env>>>,
     /// Thread and function panics invoked so far.
     panics: RefCell<Vec<Box<Any + Send + 'static>>>,
     // !Send + !Sync
@@ -200,14 +198,13 @@ unsafe impl<'scope, T> Sync for ScopedJoinHandle<'scope, T> {}
 
 /// Create a new `Scope` for [*scoped thread spawning*](struct.Scope.html#method.spawn).
 ///
-/// In addition, you can [register ad-hoc functions](struct.Scope.html#method.defer) that are
-/// deferred to be run. No matter what happens, before the `Scope` is dropped, it is guaranteed that
-/// all the unjoined spawned scoped threads are joined and the deferred functions are run.
+/// No matter what happens, before the `Scope` is dropped, it is guaranteed that all the unjoined
+/// spawned scoped threads are joined.
 ///
-/// `thread::scope()` returns `Ok(())` if all the unjoined spawned threads and the deferred
-/// functions did not panic. It returns `Err(e)` if one of them panics with `e`. If many of them
-/// panics, it is still guaranteed that all the threads are joined and all the functions are run,
-/// and `thread::scope()` returns `Err(e)` with `e` from a panicking thread or function.
+/// `thread::scope()` returns `Ok(())` if all the unjoined spawned threads did not panic. It returns
+/// `Err(e)` if one of them panics with `e`. If many of them panics, it is still guaranteed that all
+/// the threads are joined and all the functions are run, and `thread::scope()` returns `Err(e)`
+/// with `e` from a panicking thread or function.
 ///
 /// # Examples
 ///
@@ -215,7 +212,6 @@ unsafe impl<'scope, T> Sync for ScopedJoinHandle<'scope, T> {}
 ///
 /// ```
 /// crossbeam_utils::thread::scope(|scope| {
-///     scope.defer(|| println!("Exiting scope"));
 ///     scope.spawn(|| println!("Running child thread in scope"));
 /// }).unwrap();
 /// // Prints messages
@@ -226,15 +222,14 @@ where
 {
     let mut scope = Scope {
         joins: RefCell::new(Vec::new()),
-        funcs: RefCell::new(Vec::new()),
         panics: RefCell::new(Vec::new()),
         _marker: PhantomData,
     };
 
-    // Executes the scoped function.
-    let ret = f(&scope);
+    // Executes the scoped function. Panic will be catched as `Err`.
+    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| f(&scope)));
 
-    // Executes deferred functions and joins threads.
+    // Joins all the threads.
     scope.drop_all();
     let panic = scope.panics.borrow_mut().pop();
 
@@ -244,7 +239,7 @@ where
     }
 
     // Returns the result of the scoped function.
-    Ok(ret)
+    result
 }
 
 impl<'env> fmt::Debug for Scope<'env> {
@@ -268,14 +263,6 @@ impl<'env> Scope<'env> {
     // FIXME(jeehoonkang): @rust-lang/rust#14875 is fixed, so maybe we can remove the above comment.
     // But I'd like to write tests to check it before removing the comment.
     fn drop_all(&mut self) {
-        let mut funcs = self.funcs.borrow_mut();
-        for func in funcs.drain(..) {
-            let result = panic::catch_unwind(AssertUnwindSafe(|| func.call_box()));
-            if let Err(payload) = result {
-                self.panics.borrow_mut().push(payload);
-            }
-        }
-
         let mut joins = self.joins.borrow_mut();
         for join in joins.drain(..) {
             let result = join.call_box();
@@ -283,17 +270,6 @@ impl<'env> Scope<'env> {
                 self.panics.borrow_mut().push(payload);
             }
         }
-    }
-
-    /// Schedule code to be executed when exiting the scope.
-    ///
-    /// This is akin to having a destructor on the stack, except that it is *guaranteed* to be
-    /// run. It is guaranteed that the function is called before all the spawned threads are joined.
-    pub fn defer<F>(&self, f: F)
-    where
-        F: FnOnce() + 'env,
-    {
-        self.funcs.borrow_mut().push(Box::new(f));
     }
 
     /// Create a scoped thread.
@@ -412,8 +388,8 @@ impl<'scope, T> ScopedJoinHandle<'scope, T> {
 impl<'env> Drop for Scope<'env> {
     fn drop(&mut self) {
         // Note that `self.dtors` can be non-empty when the code inside a `scope()` panics and
-        // `drop()` is called in unwinding. Even if it's the case, we will join the unjoined threads
-        // and execute the deferred functions.
+        // `drop()` is called in unwinding. Even if it's the case, we will join the unjoined
+        // threads.
         //
         // We ignore panics from any threads or functions because we're in course of unwinding
         // anyway.
@@ -486,7 +462,7 @@ mod tests {
     }
 
     #[test]
-    fn counter_defer_panic() {
+    fn counter_panic() {
         let counter = AtomicUsize::new(0);
         let result = scope(|scope| {
             scope.spawn(|| {
@@ -495,39 +471,24 @@ mod tests {
             thread::sleep(time::Duration::from_millis(100));
 
             for _ in 0..TIMES {
-                scope.defer(|| {
-                    counter.fetch_add(1, Ordering::Relaxed);
-                });
-            }
-
-            for _ in 0..TIMES {
                 scope.spawn(|| {
                     counter.fetch_add(1, Ordering::Relaxed);
                 });
             }
         });
 
-        assert_eq!(TIMES + TIMES, counter.load(Ordering::Relaxed));
+        assert_eq!(TIMES, counter.load(Ordering::Relaxed));
         assert!(result.is_err());
     }
 
     #[test]
-    fn counter_defer_join() {
-        let counter = AtomicUsize::new(0);
-        scope(|scope| {
-            let _handle = scope.spawn(|| {
-                counter.store(1, Ordering::Relaxed);
+    fn panic_twice() {
+        let result = scope(|scope| {
+            scope.spawn(|| {
+                panic!();
             });
-
-            // FIXME(jeehoonkang): currently we cannot defer to join `handle`, because `defer()`
-            // requires the closure to outlive `'env` while `handle` doesn't. Related #33.
-            //
-            // // It is safe to defer to join a thread because deferred functions are executed before
-            // // unjoined threads are joined.
-            // scope.defer(move || handle.join().unwrap());
-        }).unwrap();
-
-        // There should be sufficient synchronization.
-        assert_eq!(1, counter.load(Ordering::Relaxed));
+            panic!();
+        });
+        assert!(result.is_err());
     }
 }
