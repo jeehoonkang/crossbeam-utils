@@ -152,9 +152,7 @@ where
 {
     let closure: Box<FnBox<T> + 'a> = Box::new(f);
     let closure: Box<FnBox<T> + Send> = mem::transmute(closure);
-    builder.spawn(move || {
-        closure.call_box()
-    })
+    builder.spawn(move || closure.call_box())
 }
 
 pub struct Scope<'env> {
@@ -170,22 +168,22 @@ pub struct Scope<'env> {
 
 struct JoinState<T> {
     join_handle: thread::JoinHandle<()>,
-    result: ScopedThreadResult<T>
+    result: ScopedThreadResult<T>,
 }
 
 impl<T> JoinState<T> {
     fn new(join_handle: thread::JoinHandle<()>, result: ScopedThreadResult<T>) -> JoinState<T> {
         JoinState {
             join_handle,
-            result
+            result,
         }
     }
 
     fn join(self) -> thread::Result<T> {
         let result = self.result;
-        self.join_handle.join().map(|_| {
-            result.lock().unwrap().take().unwrap()
-        })
+        self.join_handle
+            .join()
+            .map(|_| result.lock().unwrap().take().unwrap())
     }
 }
 
