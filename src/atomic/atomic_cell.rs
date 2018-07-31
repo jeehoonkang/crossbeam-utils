@@ -633,9 +633,7 @@ impl Lock {
                 };
             }
 
-            if step < 5 {
-                // Just try again.
-            } else if step < 10 {
+            if step < 10 {
                 atomic::spin_loop_hint();
             } else {
                 #[cfg(not(feature = "use_std"))]
