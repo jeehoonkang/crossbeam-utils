@@ -615,7 +615,7 @@ impl Lock {
     #[inline]
     fn validate_read(&self, stamp: usize) -> bool {
         atomic::fence(Ordering::Acquire);
-        self.state.load(Ordering::SeqCst) == stamp
+        self.state.load(Ordering::Relaxed) == stamp
     }
 
     /// Grabs the lock for writing.
@@ -627,7 +627,9 @@ impl Lock {
             let previous = self.state.swap(1, Ordering::Acquire);
 
             if previous != 1 {
-                break WriteGuard {
+                atomic::fence(Ordering::Release);
+
+                return WriteGuard {
                     lock: self,
                     state: previous,
                 };
