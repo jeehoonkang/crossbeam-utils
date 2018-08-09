@@ -789,7 +789,10 @@ where
             // Try doing an optimistic read first.
             if let Some(stamp) = lock.optimistic_read() {
                 // We need a volatile read here because other threads might concurrently modify the
-                // value.
+                // value. In theory, data races are *always* UB, even if we use volatile reads and
+                // discard the data when a data race is detected. The proper solution would be to
+                // do atomic reads and atomic writes, but we can't atomically read and write all
+                // kinds of data since `AtomicU8` is not available on stable Rust yet.
                 let val = ptr::read_volatile(src);
 
                 if lock.validate_read(stamp) {
