@@ -106,28 +106,18 @@
 /// ```
 ///
 /// Much more straightforward.
-use std::any::Any;
 use std::cell::RefCell;
 use std::fmt;
 use std::io;
 use std::marker::PhantomData;
 use std::mem;
-use std::ops::DerefMut;
 use std::panic;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc, Mutex,
+};
 use std::thread;
-
-#[doc(hidden)]
-trait FnBox<T> {
-    fn call_box(self: Box<Self>) -> T;
-}
-
-impl<T, F: FnOnce() -> T> FnBox<T> for F {
-    fn call_box(self: Box<Self>) -> T {
-        (*self)()
-    }
-}
 
 /// Like [`std::thread::spawn`], but without lifetime bounds on the closure.
 ///
@@ -160,47 +150,6 @@ where
     builder.spawn(move || closure.call_box())
 }
 
-pub struct Scope<'env> {
-    /// The list of the thread join jobs.
-    joins: RefCell<Vec<Box<FnBox<thread::Result<()>> + 'env>>>,
-    /// Thread panics invoked so far.
-    panics: Vec<Box<Any + Send + 'static>>,
-    // !Send + !Sync
-    _marker: PhantomData<*const ()>,
-}
-
-struct JoinState<T> {
-    join_handle: thread::JoinHandle<()>,
-    result: ScopedThreadResult<T>,
-}
-
-impl<T> JoinState<T> {
-    fn new(join_handle: thread::JoinHandle<()>, result: ScopedThreadResult<T>) -> JoinState<T> {
-        JoinState {
-            join_handle,
-            result,
-        }
-    }
-
-    fn join(self) -> thread::Result<T> {
-        let result = self.result;
-        self.join_handle
-            .join()
-            .map(|_| result.lock().unwrap().take().unwrap())
-    }
-}
-
-/// A handle to a scoped thread
-pub struct ScopedJoinHandle<'scope, T: 'scope> {
-    // !Send + !Sync
-    inner: Rc<RefCell<Option<JoinState<T>>>>,
-    thread: thread::Thread,
-    _marker: PhantomData<&'scope T>,
-}
-
-unsafe impl<'scope, T> Send for ScopedJoinHandle<'scope, T> {}
-unsafe impl<'scope, T> Sync for ScopedJoinHandle<'scope, T> {}
-
 /// Creates a new `Scope` for [*scoped thread spawning*](struct.Scope.html#method.spawn).
 ///
 /// No matter what happens, before the `Scope` is dropped, it is guaranteed that all the unjoined
@@ -224,58 +173,26 @@ pub fn scope<'env, F, R>(f: F) -> thread::Result<R>
 where
     F: FnOnce(&Scope<'env>) -> R,
 {
-    let mut scope = Scope {
-        joins: RefCell::new(Vec::new()),
-        panics: Vec::new(),
-        _marker: PhantomData,
-    };
+    let scope = Default::default();
 
-    // Executes the scoped function. Panic will be catched as `Err`.
+    // Executes the scoped function. Panics will be caught as `Err`, which makes this function
+    // exception safe.
     let result = panic::catch_unwind(panic::AssertUnwindSafe(|| f(&scope)));
 
-    // Joins all the threads.
-    scope.join_all();
-    let panic = scope.panics.pop();
-
-    // If any of the threads panicked, returns the panic's payload.
-    if let Some(payload) = panic {
-        return Err(payload);
-    }
-
-    // Returns the result of the scoped function.
+    // Joins all the threads, if any of the threads (joins) panicked, returns the error Result.
+    scope.join_all()?;
     result
 }
 
-impl<'env> fmt::Debug for Scope<'env> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Scope {{ ... }}")
-    }
-}
-
-impl<'scope, T> fmt::Debug for ScopedJoinHandle<'scope, T> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "ScopedJoinHandle {{ ... }}")
-    }
+#[derive(Default)]
+pub struct Scope<'env> {
+    /// The list of the thread join jobs.
+    joins: RefCell<Vec<Box<FnBox<thread::Result<()>> + 'env>>>,
+    // !Send + !Sync
+    _marker: PhantomData<*const ()>,
 }
 
 impl<'env> Scope<'env> {
-    // This method is carefully written in a transactional style, so that it can be called directly
-    // and, if any thread join panics, can be resumed in the unwinding this causes. By initially
-    // running the method outside of any destructor, we avoid any leakage problems due to
-    // @rust-lang/rust#14875.
-    //
-    // FIXME(jeehoonkang): @rust-lang/rust#14875 is fixed, so maybe we can remove the above comment.
-    // But I'd like to write tests to check it before removing the comment.
-    fn join_all(&mut self) {
-        let mut joins = self.joins.borrow_mut();
-        for join in joins.drain(..) {
-            let result = join.call_box();
-            if let Err(payload) = result {
-                self.panics.push(payload);
-            }
-        }
-    }
-
     /// Create a scoped thread.
     ///
     /// `spawn` is similar to the [`spawn`] function in Rust's standard library. The difference is
@@ -300,6 +217,102 @@ impl<'env> Scope<'env> {
             scope: self,
             builder: thread::Builder::new(),
         }
+    }
+
+    ///
+    pub fn stat_counting<'scope>(&'scope self) -> StatCountingScope<'scope, 'env> {
+        StatCountingScope::from(self)
+    }
+
+    // This method is carefully written in a transactional style, so that it can be called directly
+    // and, if any thread join panics, can be resumed in the unwinding this causes. By initially
+    // running the method outside of any destructor, we avoid any leakage problems due to
+    // @rust-lang/rust#14875.
+    //
+    // FIXME(jeehoonkang): @rust-lang/rust#14875 is fixed, so maybe we can remove the above comment.
+    // But I'd like to write tests to check it before removing the comment.
+    fn join_all(self) -> thread::Result<()> {
+        self.joins
+            .into_inner()
+            .into_iter()
+            .fold(Ok(()), |result, join| result.and(join.call_box()))
+    }
+}
+
+impl<'env> fmt::Debug for Scope<'env> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Scope {{ ... }}")
+    }
+}
+
+pub struct StatCountingScope<'scope, 'env: 'scope> {
+    scope: &'scope Scope<'env>,
+    stats: ScopeStats,
+}
+
+impl<'scope, 'env: 'scope> From<&'scope Scope<'env>> for StatCountingScope<'scope, 'env> {
+    fn from(scope: &'scope Scope<'env>) -> Self {
+        Self {
+            scope,
+            stats: Default::default(),
+        }
+    }
+}
+
+impl<'scope, 'env: 'scope> StatCountingScope<'scope, 'env> {
+    /// Create a stat keeping scoped thread.
+    ///
+    /// This is essentially a wrapper function for `Scope::spawn`.
+    /// To enable stat keeping for the scoped threads of a `Scope`, call the `Scope::stat_counting`
+    /// function on a regular `Scope`.
+    pub fn spawn<F, T>(&'scope self, f: F) -> ScopedJoinHandle<'scope, T>
+    where
+        F: FnOnce() -> T,
+        F: Send + 'env,
+        T: Send + 'env,
+    {
+        self.scope.spawn(wrap_stat_counting(&self.stats, f))
+    }
+
+    /// Generates the base configuration for spawning a scoped thread, from which configuration
+    /// methods can be chained.
+    ///
+    /// This is a wrapper function for `Scope::builder`.
+    pub fn builder(&'scope self) -> StatCountingScopedThreadBuilder<'scope, 'env> {
+        StatCountingScopedThreadBuilder {
+            scope: self,
+            builder: self.scope.builder(),
+        }
+    }
+
+    /// Get the current count of running threads.
+    ///
+    /// This is not guaranteed to be completely accurate, as there is a small delay between the
+    /// decrementing of the running count and the incrementing of the completed/panicked count.
+    pub fn running_count(&self) -> usize {
+        self.stats.running.load(Ordering::SeqCst)
+    }
+
+    /// Get the current count of completed threads.
+    ///
+    /// This is not guaranteed to be completely accurate, as there is a small delay between the
+    /// decrementing of the running count and the incrementing of the completed/panicked count.
+    pub fn completed_count(&self) -> usize {
+        self.stats.completed.load(Ordering::SeqCst)
+    }
+
+    /// Get the current count of panicked threads.
+    ///
+    /// This is not guaranteed to be completely accurate, as there is a small delay between the
+    /// decrementing of the running count and the incrementing of the completed/panicked count.
+    pub fn panicked_count(&self) -> usize {
+        self.stats.panicked.load(Ordering::SeqCst)
+    }
+}
+
+impl<'scope, 'env: 'scope> fmt::Debug for StatCountingScope<'scope, 'env> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "StatCountingScope {{ ... }}")
     }
 }
 
@@ -347,7 +360,7 @@ impl<'scope, 'env: 'scope> ScopedThreadBuilder<'scope, 'env> {
         let my_handle = deferred_handle.clone();
 
         self.scope.joins.borrow_mut().push(Box::new(move || {
-            let state = deferred_handle.borrow_mut().deref_mut().take();
+            let state = deferred_handle.borrow_mut().take();
             if let Some(state) = state {
                 state.join().map(|_| ())
             } else {
@@ -363,6 +376,50 @@ impl<'scope, 'env: 'scope> ScopedThreadBuilder<'scope, 'env> {
     }
 }
 
+/// Scoped thread configuration with stat counting (a wrapper for `ScopedThreadBuilder`)
+///
+/// Provides detailed control over the properties and behavior of new scoped threads.
+pub struct StatCountingScopedThreadBuilder<'scope, 'env: 'scope> {
+    scope: &'scope StatCountingScope<'scope, 'env>,
+    builder: ScopedThreadBuilder<'scope, 'env>,
+}
+
+impl<'scope, 'env: 'scope> StatCountingScopedThreadBuilder<'scope, 'env> {
+    /// Wrapper function for `ScopedThreadBuilder::name`
+    pub fn name(mut self, name: String) -> Self {
+        self.builder = self.builder.name(name);
+        self
+    }
+
+    /// Wrapper function for `ScopedThreadBuilder::stack_size`
+    pub fn stack_size(mut self, size: usize) -> Self {
+        self.builder = self.builder.stack_size(size);
+        self
+    }
+
+    /// Spawns a new thread, and returns a join handle for it.
+    pub fn spawn<F, T>(self, f: F) -> io::Result<ScopedJoinHandle<'scope, T>>
+    where
+        F: FnOnce() -> T,
+        F: Send + 'env,
+        T: Send + 'env,
+    {
+        self.builder.spawn(wrap_stat_counting(&self.scope.stats, f))
+    }
+}
+
+//FIXME(oliver-giersch): Is this a good idea in combination with `Rc<RefCell<_>>`?
+unsafe impl<'scope, T> Send for ScopedJoinHandle<'scope, T> {}
+unsafe impl<'scope, T> Sync for ScopedJoinHandle<'scope, T> {}
+
+/// A handle to a scoped thread
+pub struct ScopedJoinHandle<'scope, T: 'scope> {
+    // !Send + !Sync
+    inner: Rc<RefCell<Option<JoinState<T>>>>,
+    thread: thread::Thread,
+    _marker: PhantomData<&'scope T>,
+}
+
 impl<'scope, T> ScopedJoinHandle<'scope, T> {
     /// Waits for the associated thread to finish.
     ///
@@ -376,7 +433,7 @@ impl<'scope, T> ScopedJoinHandle<'scope, T> {
     /// This function may panic on some platforms if a thread attempts to join itself or otherwise
     /// may create a deadlock with joining threads.
     pub fn join(self) -> thread::Result<T> {
-        let state = self.inner.borrow_mut().deref_mut().take();
+        let state = (*self.inner.borrow_mut()).take();
         state.unwrap().join()
     }
 
@@ -388,18 +445,100 @@ impl<'scope, T> ScopedJoinHandle<'scope, T> {
     }
 }
 
-impl<'env> Drop for Scope<'env> {
-    fn drop(&mut self) {
-        // Note that `self.joins` can be non-empty when the code inside a `scope()` panics and
-        // `drop()` is called in unwinding. Even if it's the case, we will join the unjoined
-        // threads.
-        //
-        // We ignore panics from any threads because we're in course of unwinding anyway.
-        self.join_all();
+impl<'scope, T> fmt::Debug for ScopedJoinHandle<'scope, T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "ScopedJoinHandle {{ ... }}")
     }
 }
 
 type ScopedThreadResult<T> = Arc<Mutex<Option<T>>>;
+
+struct JoinState<T> {
+    join_handle: thread::JoinHandle<()>,
+    result: ScopedThreadResult<T>,
+}
+
+impl<T> JoinState<T> {
+    fn new(join_handle: thread::JoinHandle<()>, result: ScopedThreadResult<T>) -> JoinState<T> {
+        JoinState {
+            join_handle,
+            result,
+        }
+    }
+
+    fn join(self) -> thread::Result<T> {
+        let result = self.result;
+        self.join_handle
+            .join()
+            .map(|_| result.lock().unwrap().take().unwrap())
+    }
+}
+
+#[derive(Default)]
+struct ScopeStats {
+    running: AtomicUsize,
+    completed: AtomicUsize,
+    panicked: AtomicUsize,
+}
+
+/// A guard for ensuring the scope's stats are kept updated.
+struct PanicGuard<'scope> {
+    stats: &'scope ScopeStats,
+}
+
+impl<'scope> PanicGuard<'scope> {
+    /// Increases the running count
+    fn new(stats: &'scope ScopeStats) -> Self {
+        stats.running.fetch_add(1, Ordering::SeqCst);
+        PanicGuard { stats }
+    }
+}
+
+impl<'scope> Drop for PanicGuard<'scope> {
+    /// Ensures the stats are updated in the case of normal completion or a thread panicking.
+    fn drop(&mut self) {
+        self.stats.running.fetch_sub(1, Ordering::SeqCst);
+        if thread::panicking() {
+            self.stats.panicked.fetch_add(1, Ordering::SeqCst);
+        } else {
+            self.stats.completed.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
+/// Wrap a thread closure to enable stat counting with a `StatCountingScope`.
+///
+/// The lifetime transmutation is safe, because no references to the stats can leak out of the
+/// closure and the guard is guaranteed to be dropped at the end of the closure.
+fn wrap_stat_counting<'env, 'scope, F, T>(
+    stats: &'scope ScopeStats,
+    f: F,
+) -> impl FnOnce() -> T + Send + 'env
+where
+    'env: 'scope,
+    F: FnOnce() -> T,
+    F: Send + 'env,
+    T: Send + 'env,
+{
+    // This is necessary to satisfy the lifetime bound on the closure (`'env`) and to keep the
+    // `StatKeepingScope` entirely separate/opt-in.
+    let stats: &'env ScopeStats = unsafe { mem::transmute(stats) };
+    move || {
+        let _guard = PanicGuard::new(stats);
+        f()
+    }
+}
+
+#[doc(hidden)]
+trait FnBox<T> {
+    fn call_box(self: Box<Self>) -> T;
+}
+
+impl<T, F: FnOnce() -> T> FnBox<T> for F {
+    fn call_box(self: Box<Self>) -> T {
+        (*self)()
+    }
+}
 
 #[cfg(test)]
 mod tests {
