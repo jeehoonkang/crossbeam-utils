@@ -120,10 +120,10 @@ use std::thread;
 ///
 /// [`std::thread::spawn`]: https://doc.rust-lang.org/stable/std/thread/fn.spawn.html
 pub unsafe fn spawn_unchecked<'a, F, T>(f: F) -> thread::JoinHandle<T>
-    where
-        F: FnOnce() -> T,
-        F: Send + 'a,
-        T: Send + 'static,
+where
+    F: FnOnce() -> T,
+    F: Send + 'a,
+    T: Send + 'static,
 {
     let builder = thread::Builder::new();
     builder_spawn_unchecked(builder, f).unwrap()
@@ -137,10 +137,10 @@ pub unsafe fn builder_spawn_unchecked<'a, F, T>(
     builder: thread::Builder,
     f: F,
 ) -> io::Result<thread::JoinHandle<T>>
-    where
-        F: FnOnce() -> T,
-        F: Send + 'a,
-        T: Send + 'static,
+where
+    F: FnOnce() -> T,
+    F: Send + 'a,
+    T: Send + 'static,
 {
     let closure: Box<FnBox<T> + 'a> = Box::new(f);
     let closure: Box<FnBox<T> + Send> = mem::transmute(closure);
@@ -167,8 +167,8 @@ pub unsafe fn builder_spawn_unchecked<'a, F, T>(
 /// }).unwrap();
 /// ```
 pub fn scope<'env, F, R>(f: F) -> thread::Result<R>
-    where
-        F: FnOnce(&Scope<'env>) -> R,
+where
+    F: FnOnce(&Scope<'env>) -> R,
 {
     let scope = Default::default();
 
@@ -199,10 +199,10 @@ impl<'env> Scope<'env> {
     ///
     /// [`spawn`]: https://doc.rust-lang.org/std/thread/fn.spawn.html
     pub fn spawn<'scope, F, T>(&'scope self, f: F) -> ScopedJoinHandle<'scope, T>
-        where
-            F: FnOnce() -> T,
-            F: Send + 'env,
-            T: Send + 'env,
+    where
+        F: FnOnce() -> T,
+        F: Send + 'env,
+        T: Send + 'env,
     {
         self.builder().spawn(f).unwrap()
     }
@@ -260,10 +260,10 @@ impl<'scope, 'env: 'scope> ScopedThreadBuilder<'scope, 'env> {
 
     /// Spawns a new thread, and returns a join handle for it.
     pub fn spawn<F, T>(self, f: F) -> io::Result<ScopedJoinHandle<'scope, T>>
-        where
-            F: FnOnce() -> T,
-            F: Send + 'env,
-            T: Send + 'env,
+    where
+        F: FnOnce() -> T,
+        F: Send + 'env,
+        T: Send + 'env,
     {
         let result = Arc::new(Mutex::new(None));
 
