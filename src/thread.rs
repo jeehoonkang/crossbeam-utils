@@ -132,7 +132,7 @@ impl<T, F: FnOnce() -> T> FnBox<T> for F {
 /// Like [`std::thread::spawn`], but without lifetime bounds on the closure.
 ///
 /// [`std::thread::spawn`]: https://doc.rust-lang.org/stable/std/thread/fn.spawn.html
-pub unsafe fn spawn_unchecked<'a, F, T>(f: F) -> thread::JoinHandle<T>
+pub unsafe fn spawn_unchecked<'env, F, T>(f: F) -> thread::JoinHandle<T>
 where
     F: FnOnce() -> T,
     F: Send + 'env,
@@ -286,7 +286,6 @@ impl<'env> Scope<'env> {
     /// [`spawn`]: https://doc.rust-lang.org/std/thread/fn.spawn.html
     pub fn spawn<'scope, F, T>(&'scope self, f: F) -> ScopedJoinHandle<'scope, T>
     where
-        'env: 'scope,
         F: FnOnce() -> T,
         F: Send + 'env,
         T: Send + 'env,
@@ -296,10 +295,7 @@ impl<'env> Scope<'env> {
 
     /// Generates the base configuration for spawning a scoped thread, from which configuration
     /// methods can be chained.
-    pub fn builder<'scope>(&'scope self) -> ScopedThreadBuilder<'scope, 'env>
-    where
-        'env: 'scope
-    {
+    pub fn builder<'scope>(&'scope self) -> ScopedThreadBuilder<'scope, 'env> {
         ScopedThreadBuilder {
             scope: self,
             builder: thread::Builder::new(),
