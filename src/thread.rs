@@ -219,7 +219,8 @@ impl<'env> Scope<'env> {
         }
     }
 
-    ///
+    /// Generates a wrapper around the scope that enables stat counting on all newly spawned or
+    /// built scoped threads.
     pub fn stat_counting<'scope>(&'scope self) -> StatCountingScope<'scope, 'env> {
         StatCountingScope::from(self)
     }
@@ -481,31 +482,6 @@ struct ScopeStats {
     panicked: AtomicUsize,
 }
 
-/// A guard for ensuring the scope's stats are kept updated.
-struct PanicGuard<'scope> {
-    stats: &'scope ScopeStats,
-}
-
-impl<'scope> PanicGuard<'scope> {
-    /// Increases the running count
-    fn new(stats: &'scope ScopeStats) -> Self {
-        stats.running.fetch_add(1, Ordering::SeqCst);
-        PanicGuard { stats }
-    }
-}
-
-impl<'scope> Drop for PanicGuard<'scope> {
-    /// Ensures the stats are updated in the case of normal completion or a thread panicking.
-    fn drop(&mut self) {
-        self.stats.running.fetch_sub(1, Ordering::SeqCst);
-        if thread::panicking() {
-            self.stats.panicked.fetch_add(1, Ordering::SeqCst);
-        } else {
-            self.stats.completed.fetch_add(1, Ordering::SeqCst);
-        }
-    }
-}
-
 /// Wrap a thread closure to enable stat counting with a `StatCountingScope`.
 ///
 /// The lifetime transmutation is safe, because no references to the stats can leak out of the
@@ -524,8 +500,19 @@ where
     // `StatKeepingScope` entirely separate/opt-in.
     let stats: &'env ScopeStats = unsafe { mem::transmute(stats) };
     move || {
-        let _guard = PanicGuard::new(stats);
-        f()
+        stats.running.fetch_add(1, Ordering::SeqCst);
+        match panic::catch_unwind(panic::AssertUnwindSafe(|| f())) {
+            Ok(res) => {
+                stats.running.fetch_sub(1, Ordering::SeqCst);
+                stats.completed.fetch_add(1, Ordering::SeqCst);
+                return res;
+            }
+            Err(err) => {
+                stats.running.fetch_sub(1, Ordering::SeqCst);
+                stats.panicked.fetch_add(1, Ordering::SeqCst);
+                panic::resume_unwind(err);
+            }
+        };
     }
 }
 
