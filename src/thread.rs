@@ -112,7 +112,6 @@ use std::io;
 use std::marker::PhantomData;
 use std::mem;
 use std::panic;
-use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -170,7 +169,10 @@ pub fn scope<'env, F, R>(f: F) -> thread::Result<R>
 where
     F: FnOnce(&Scope<'env>) -> R,
 {
-    let scope = Default::default();
+    let scope = Scope {
+        joins: RefCell::new(Vec::new()),
+        _marker: PhantomData,
+    };
 
     // Executes the scoped function. Panics will be caught as `Err`, which makes this function
     // exception safe.
@@ -181,7 +183,6 @@ where
     result
 }
 
-#[derive(Default)]
 pub struct Scope<'env> {
     /// The list of the thread join jobs.
     joins: RefCell<Vec<Box<FnBox<thread::Result<()>> + 'env>>>,
@@ -275,13 +276,17 @@ impl<'scope, 'env: 'scope> ScopedThreadBuilder<'scope, 'env> {
         }?;
 
         let thread = join_handle.thread().clone();
-
         let join_state = JoinState::<T>::new(join_handle, result);
-        let deferred_handle = Rc::new(RefCell::new(Some(join_state)));
-        let my_handle = deferred_handle.clone();
 
+        let handle = ScopedJoinHandle {
+            inner: Arc::new(Mutex::new(Some(join_state))),
+            thread,
+            _marker: PhantomData,
+        };
+
+        let deferred_handle = Arc::clone(&handle.inner);
         self.scope.joins.borrow_mut().push(Box::new(move || {
-            let state = deferred_handle.borrow_mut().take();
+            let state = deferred_handle.lock().unwrap().take();
             if let Some(state) = state {
                 state.join().map(|_| ())
             } else {
@@ -289,22 +294,16 @@ impl<'scope, 'env: 'scope> ScopedThreadBuilder<'scope, 'env> {
             }
         }));
 
-        Ok(ScopedJoinHandle {
-            inner: my_handle,
-            thread: thread,
-            _marker: PhantomData,
-        })
+        Ok(handle)
     }
 }
 
-//FIXME(oliver-giersch): Is this a good idea in combination with `Rc<RefCell<_>>`?
 unsafe impl<'scope, T> Send for ScopedJoinHandle<'scope, T> {}
 unsafe impl<'scope, T> Sync for ScopedJoinHandle<'scope, T> {}
 
 /// A handle to a scoped thread
 pub struct ScopedJoinHandle<'scope, T: 'scope> {
-    // !Send + !Sync
-    inner: Rc<RefCell<Option<JoinState<T>>>>,
+    inner: Arc<Mutex<Option<JoinState<T>>>>,
     thread: thread::Thread,
     _marker: PhantomData<&'scope T>,
 }
@@ -322,7 +321,7 @@ impl<'scope, T> ScopedJoinHandle<'scope, T> {
     /// This function may panic on some platforms if a thread attempts to join itself or otherwise
     /// may create a deadlock with joining threads.
     pub fn join(self) -> thread::Result<T> {
-        let state = (*self.inner.borrow_mut()).take();
+        let state = self.inner.lock().unwrap().take();
         state.unwrap().join()
     }
 
@@ -363,7 +362,6 @@ impl<T> JoinState<T> {
     }
 }
 
-#[doc(hidden)]
 trait FnBox<T> {
     fn call_box(self: Box<Self>) -> T;
 }
