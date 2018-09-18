@@ -107,7 +107,6 @@
 //!
 //! Much more straightforward.
 
-use std::any::Any;
 use std::cell::RefCell;
 use std::fmt;
 use std::io;
@@ -176,13 +175,23 @@ where
         _marker: PhantomData,
     };
 
-    // Executes the scoped function. Panics will be caught as `Err`, which makes this function
-    // exception safe.
+    // Execute the scoped function, but catch any panics.
     let result = panic::catch_unwind(panic::AssertUnwindSafe(|| f(&scope)));
 
-    // Joins all the threads, if any of the threads (joins) panicked, returns the error Result.
-    scope.join_all()?;
-    result
+    // Join all remaining spawned threads.
+    let results = scope.joins
+        .into_inner()
+        .into_iter()
+        .map(|join| join.call_box())
+        .collect::<Vec<_>>();
+
+    result.and_then(|r| {
+        if results.iter().all(|r| r.is_ok()) {
+            Ok(r)
+        } else {
+            Err(Box::new(results))
+        }
+    })
 }
 
 pub struct Scope<'env> {
@@ -218,20 +227,6 @@ impl<'env> Scope<'env> {
             builder: thread::Builder::new(),
         }
     }
-
-    // This method is carefully written in a transactional style, so that it can be called directly
-    // and, if any thread join panics, can be resumed in the unwinding this causes. By initially
-    // running the method outside of any destructor, we avoid any leakage problems due to
-    // @rust-lang/rust#14875.
-    //
-    // FIXME(jeehoonkang): @rust-lang/rust#14875 is fixed, so maybe we can remove the above comment.
-    // But I'd like to write tests to check it before removing the comment.
-    fn join_all(self) -> thread::Result<()> {
-        self.joins
-            .into_inner()
-            .into_iter()
-            .fold(Ok(()), |result, join| result.and(join.call_box()))
-    }
 }
 
 impl<'env> fmt::Debug for Scope<'env> {
@@ -247,7 +242,7 @@ pub struct ScopedThreadBuilder<'scope, 'env: 'scope> {
     builder: thread::Builder,
 }
 
-impl<'scope, 'env: 'scope> ScopedThreadBuilder<'scope, 'env> {
+impl<'scope, 'env> ScopedThreadBuilder<'scope, 'env> {
     /// Names the thread-to-be. Currently the name is used for identification only in panic
     /// messages.
     pub fn name(mut self, name: String) -> ScopedThreadBuilder<'scope, 'env> {
