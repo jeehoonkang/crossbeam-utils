@@ -222,7 +222,7 @@ impl<'env> Scope<'env> {
         let panics = self.joins
             .into_inner()
             .into_iter()
-            .filter_map(|join| join.call_box().is_err())
+            .filter_map(|join| join.call_box().err())
             .collect::<Vec<_>>();
 
         if panics.is_empty() {
@@ -464,5 +464,29 @@ mod tests {
             panic!();
         });
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn panic_many() {
+        use std::any::Any;;
+
+        let result = scope(|scope| {
+            scope.spawn(|| panic!("deliberate panic #1"));
+            scope.spawn(|| panic!("deliberate panic #2"));
+            scope.spawn(|| panic!("deliberate panic #3"));
+        });
+
+        let err = result.unwrap_err();
+        let vec = err.downcast_ref::<Vec<Box<Any + Send + 'static>>>().unwrap();
+        assert_eq!(3, vec.len());
+
+        for panic in vec.iter() {
+            let panic = panic.downcast_ref::<&str>().unwrap();
+            assert!(
+                *panic == "deliberate panic #1"
+                    || *panic == "deliberate panic #2"
+                    || *panic == "deliberate panic #3"
+            );
+        }
     }
 }
