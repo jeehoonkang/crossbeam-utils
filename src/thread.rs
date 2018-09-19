@@ -107,6 +107,7 @@
 //!
 //! Much more straightforward.
 
+use std::any::Any;
 use std::cell::RefCell;
 use std::fmt;
 use std::io;
@@ -177,10 +178,22 @@ where
 
     // Execute the scoped function, but catch any panics.
     let result = panic::catch_unwind(panic::AssertUnwindSafe(|| f(&scope)));
-
     // Join all remaining spawned threads.
-    scope.join_all()?;
-    result
+    let mut panics = scope.join_all();
+
+    match result {
+        Ok(res) => if panics.is_empty() {
+            Ok(res)
+        } else {
+            Err(Box::new(panics))
+        },
+        Err(err) => {
+            let mut vec = Vec::with_capacity(1 + panics.len());
+            vec.push(err);
+            vec.append(&mut panics);
+            Err(Box::new(vec))
+        }
+    }
 }
 
 pub struct Scope<'env> {
@@ -218,18 +231,13 @@ impl<'env> Scope<'env> {
     }
 
     /// Join all remaining threads and return all potential error payloads
-    fn join_all(self) -> thread::Result<()> {
-        let panics = self.joins
+    fn join_all(self) -> Vec<Box<Any + Send + 'static>> {
+        self
+            .joins
             .into_inner()
             .into_iter()
             .filter_map(|join| join.call_box().err())
-            .collect::<Vec<_>>();
-
-        if panics.is_empty() {
-            Ok(())
-        } else {
-            Err(Box::new(panics))
-        }
+            .collect()
     }
 }
 
@@ -459,17 +467,21 @@ mod tests {
     fn panic_twice() {
         let result = scope(|scope| {
             scope.spawn(|| {
-                panic!();
+                panic!("thread");
             });
-            panic!();
+            panic!("scope");
         });
-        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        let vec = err.downcast_ref::<Vec<Box<Any + Send + 'static>>>().unwrap();
+        assert_eq!(2, vec.len());
+
+        let first = *(vec[0].downcast_ref::<&str>().unwrap());
+        assert_eq!("scope", first);
     }
 
     #[test]
     fn panic_many() {
-        use std::any::Any;;
-
         let result = scope(|scope| {
             scope.spawn(|| panic!("deliberate panic #1"));
             scope.spawn(|| panic!("deliberate panic #2"));
@@ -477,7 +489,9 @@ mod tests {
         });
 
         let err = result.unwrap_err();
-        let vec = err.downcast_ref::<Vec<Box<Any + Send + 'static>>>().unwrap();
+        let vec = err
+            .downcast_ref::<Vec<Box<Any + Send + 'static>>>()
+            .unwrap();
         assert_eq!(3, vec.len());
 
         for panic in vec.iter() {
