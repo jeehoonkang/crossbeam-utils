@@ -179,19 +179,8 @@ where
     let result = panic::catch_unwind(panic::AssertUnwindSafe(|| f(&scope)));
 
     // Join all remaining spawned threads.
-    let results = scope.joins
-        .into_inner()
-        .into_iter()
-        .map(|join| join.call_box())
-        .collect::<Vec<_>>();
-
-    result.and_then(|r| {
-        if results.iter().all(|r| r.is_ok()) {
-            Ok(r)
-        } else {
-            Err(Box::new(results))
-        }
-    })
+    scope.join_all()?;
+    result
 }
 
 pub struct Scope<'env> {
@@ -225,6 +214,21 @@ impl<'env> Scope<'env> {
         ScopedThreadBuilder {
             scope: self,
             builder: thread::Builder::new(),
+        }
+    }
+
+    /// Join all remaining threads and return all potential error payloads
+    fn join_all(self) -> thread::Result<()> {
+        let panics = self.joins
+            .into_inner()
+            .into_iter()
+            .filter_map(|join| join.call_box().is_err())
+            .collect::<Vec<_>>();
+
+        if panics.is_empty() {
+            Ok(())
+        } else {
+            Err(Box::new(panics))
         }
     }
 }
