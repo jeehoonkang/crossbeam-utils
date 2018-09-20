@@ -117,6 +117,8 @@ use std::panic;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+mod stats;
+
 /// Like [`std::thread::spawn`], but without lifetime bounds on the closure.
 ///
 /// [`std::thread::spawn`]: https://doc.rust-lang.org/stable/std/thread/fn.spawn.html
