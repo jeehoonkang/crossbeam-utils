@@ -181,18 +181,18 @@ where
     // Join all remaining spawned threads.
     let mut panics = scope.join_all();
 
-    match result {
-        Ok(res) => if panics.is_empty() {
-            Ok(res)
-        } else {
-            Err(Box::new(panics))
-        },
-        Err(err) => {
-            let mut vec = Vec::with_capacity(1 + panics.len());
-            vec.push(err);
-            vec.append(&mut panics);
-            Err(Box::new(vec))
+    if panics.is_empty() {
+        match result {
+            Ok(res) => Ok(res),
+            Err(err) => Err(Box::new(vec![err])),
         }
+    } else {
+        if let Err(err) = result {
+            panics.reserve(1);
+            panics.insert(0, err);
+        }
+
+        Err(Box::new(panics))
     }
 }
 
@@ -476,8 +476,10 @@ mod tests {
         let vec = err.downcast_ref::<Vec<Box<Any + Send + 'static>>>().unwrap();
         assert_eq!(2, vec.len());
 
-        let first = *(vec[0].downcast_ref::<&str>().unwrap());
-        assert_eq!("scope", first);
+        let first = vec[0].downcast_ref::<&str>().unwrap();
+        let second = vec[1].downcast_ref::<&str>().unwrap();
+        assert_eq!("scope", *first);
+        assert_eq!("thread", *second)
     }
 
     #[test]
