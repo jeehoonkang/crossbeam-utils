@@ -182,10 +182,7 @@ where
     let mut panics = scope.join_all();
 
     if panics.is_empty() {
-        match result {
-            Ok(res) => Ok(res),
-            Err(err) => Err(Box::new(vec![err])),
-        }
+        result.map_err(|res| Box::new(vec![res]) as _)
     } else {
         if let Err(err) = result {
             panics.reserve(1);
