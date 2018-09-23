@@ -1,3 +1,5 @@
+//! TODO: Module lvl docs
+
 use std::io;
 use std::fmt;
 use std::mem;
@@ -22,7 +24,7 @@ impl<'env> Scope<'env> {
     ///
     /// ```
     /// crossbeam_utils::thread::scope(|scope| {
-    ///     scope = scope.stat_counting();
+    ///     let scope = scope.stat_counting();
     ///
     ///     let mut handles = Vec::with_capacity(3);
     ///     handles.push(scope.spawn(|| println!("thread #1")));
@@ -43,7 +45,7 @@ impl<'env> Scope<'env> {
     }
 }
 
-/// A wrapper for a scope that enables stat counting on all newly spawned threads.
+/// A wrapper for a scope that does stat counting on all newly spawned threads.
 pub struct StatCountingScope<'scope, 'env: 'scope> {
     scope: &'scope Scope<'env>,
     stats: ScopeStats,
@@ -84,10 +86,12 @@ impl<'scope, 'env: 'scope> StatCountingScope<'scope, 'env> {
         }
     }
 
+    /// Get the current count of all spawned threads.
     pub fn spawned_count(&self) -> usize {
         self.stats.spawned.load(Ordering::SeqCst)
     }
 
+    /// Get the current count of all running threads.
     pub fn running_count(&self) -> usize {
         let completed = self.stats.completed.load(Ordering::SeqCst);
         let panicked = self.stats.panicked.load(Ordering::SeqCst);
@@ -96,10 +100,12 @@ impl<'scope, 'env: 'scope> StatCountingScope<'scope, 'env> {
         spawned - completed - panicked
     }
 
+    /// Get the current count of all completed threads.
     pub fn completed_count(&self) -> usize {
         self.stats.completed.load(Ordering::SeqCst)
     }
 
+    /// Get the current count of all panicked threads.
     pub fn panicked_count(&self) -> usize {
         self.stats.panicked.load(Ordering::SeqCst)
     }
@@ -143,13 +149,15 @@ impl<'scope, 'env: 'scope> StatCountingScopedThreadBuilder<'scope, 'env> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct ScopeStats {
     spawned: AtomicUsize,
     completed: AtomicUsize,
     panicked: AtomicUsize,
 }
 
+/// Wraps a thread's main function, so that the referenced stats struct is kept
+/// up to date.
 fn wrap_stat_counting<'env, 'scope, F, T>(
     stats: &'scope ScopeStats,
     f: F
@@ -176,5 +184,73 @@ where
                 panic::resume_unwind(err);
             }
         };
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::sync::{Arc, Barrier};
+
+    use super::super::*;
+    use super::*;
+
+    #[test]
+    fn count_stats() {
+        scope(|scope| {
+            let scope = scope.stat_counting();
+            let barrier = Arc::new(Barrier::new(3));
+
+            let thread_barrier = Arc::clone(&barrier);
+            let handle1 = scope.spawn(move || {
+                thread_barrier.wait();
+                thread_barrier.wait();
+            });
+
+            let thread_barrier = Arc::clone(&barrier);
+            let handle2 = scope.spawn(move || {
+                thread_barrier.wait();
+                thread_barrier.wait();
+            });
+
+            barrier.wait();
+
+            assert_eq!(2, scope.spawned_count());
+            assert_eq!(2, scope.running_count());
+            assert_eq!(0, scope.completed_count());
+            assert_eq!(0, scope.panicked_count());
+
+            barrier.wait();
+
+            handle1.join().unwrap();
+            handle2.join().unwrap();
+
+            assert_eq!(2, scope.completed_count());
+            assert_eq!(2, scope.panicked_count());
+        });
+    }
+
+    #[test]
+    fn count_panics() {
+        const PANICS: [bool; 8] = [true, true, true, false, false, false, false, false];
+
+        scope(|scope| {
+            let scope = scope.stat_counting();
+            let handles = (0..PANICS.len())
+                .map(|id| scope.spawn(move || {
+                    if PANICS[id] {
+                        panic!();
+                    }
+                }))
+                .collect::<Vec<_>>();
+
+            for handle in handles {
+                handle.join().unwrap();
+            }
+
+            assert_eq!(8, scope.spawned_count());
+            assert_eq!(3, scope.panicked_count());
+            assert_eq!(5, scope.completed_count());
+            assert_eq!(0, scope.running_count());
+        });
     }
 }
