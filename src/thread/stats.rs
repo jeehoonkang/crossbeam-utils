@@ -1,4 +1,8 @@
-//! TODO: Module lvl docs
+//! Module for keeping track of stats for the number of spawned,
+//! running, completed and panicked threads spawned in a scope.
+//!
+//! The provided functionality is entirely separated from the
+//! rest of the scoped thread code, so as to be purely optional.
 
 use std::io;
 use std::fmt;
@@ -31,12 +35,11 @@ impl<'env> Scope<'env> {
     ///     handles.push(scope.spawn(|| println!("thread #2")));
     ///     handles.push(scope.spawn(|| println!("thread #3")));
     ///
-    ///     assert_eq!(3, scope.spawned_count());
-    ///
     ///     for handle in handles {
     ///         handle.join().unwrap();
     ///     }
     ///
+    ///     assert_eq!(3, scope.spawned_count());
     ///     assert_eq!(3, scope.completed_count());
     /// });
     /// ```
@@ -67,10 +70,10 @@ impl<'scope, 'env: 'scope> StatCountingScope<'scope, 'env> {
     /// To enable stat keeping for the scoped threads of a `Scope`, call the `Scope::stat_counting`
     /// function on a regular `Scope`.
     pub fn spawn<F, T>(&'scope self, f: F) -> ScopedJoinHandle<'scope, T>
-        where
-            F: FnOnce() -> T,
-            F: Send + 'env,
-            T: Send + 'env,
+    where
+        F: FnOnce() -> T,
+        F: Send + 'env,
+        T: Send + 'env,
     {
         self.scope.spawn(wrap_stat_counting(&self.stats, f))
     }
@@ -149,6 +152,7 @@ impl<'scope, 'env: 'scope> StatCountingScopedThreadBuilder<'scope, 'env> {
     }
 }
 
+/// Counters for scope statistics
 #[derive(Debug, Default)]
 struct ScopeStats {
     spawned: AtomicUsize,
