@@ -61,8 +61,8 @@ impl<T> From<T> for CachePadded<T> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use core::mem;
     use core::cell::Cell;
+    use core::mem;
 
     #[test]
     fn default() {
