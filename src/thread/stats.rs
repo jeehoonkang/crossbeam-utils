@@ -9,7 +9,6 @@ use std::fmt;
 use std::mem;
 use std::panic;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::thread;
 
 use super::{Scope, ScopedThreadBuilder, ScopedJoinHandle};
 
@@ -196,7 +195,6 @@ mod test {
     use std::sync::{Arc, Barrier};
 
     use super::super::*;
-    use super::*;
 
     #[test]
     fn count_stats() {
@@ -229,8 +227,8 @@ mod test {
             handle2.join().unwrap();
 
             assert_eq!(2, scope.completed_count());
-            assert_eq!(2, scope.panicked_count());
-        });
+            assert_eq!(0, scope.panicked_count());
+        }).unwrap();
     }
 
     #[test]
@@ -255,6 +253,6 @@ mod test {
             assert_eq!(3, scope.panicked_count());
             assert_eq!(5, scope.completed_count());
             assert_eq!(0, scope.running_count());
-        });
+        }).unwrap_err();
     }
 }
