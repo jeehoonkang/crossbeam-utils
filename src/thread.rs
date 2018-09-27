@@ -6,7 +6,7 @@
 //!
 //! ```
 //! crossbeam_utils::thread::scope(|scope| {
-//!     scope.spawn(|| {
+//!     scope.spawn(|_| {
 //!         println!("Hello from a scoped thread!");
 //!     });
 //! }).unwrap();
@@ -98,7 +98,7 @@
 //!
 //! crossbeam_utils::thread::scope(|scope| {
 //!     for i in &array {
-//!         scope.spawn(move || {
+//!         scope.spawn(move |_| {
 //!             println!("element: {}", i);
 //!         });
 //!     }
@@ -107,14 +107,12 @@
 //!
 //! Much more straightforward.
 
-use std::any::Any;
-use std::cell::RefCell;
 use std::fmt;
 use std::io;
 use std::marker::PhantomData;
 use std::mem;
 use std::panic;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 
 /// Like [`std::thread::spawn`], but without lifetime bounds on the closure.
@@ -143,9 +141,17 @@ where
     F: Send + 'env,
     T: Send + 'static,
 {
-    let closure: Box<FnBox<T> + Send + 'env> = Box::new(f);
-    let closure: Box<FnBox<T> + Send + 'static> = mem::transmute(closure);
-    builder.spawn(move || closure.call_box())
+    // Change the type of `f` from `FnOnce() -> T` to `FnMut() -> T`.
+    let mut f = Some(f);
+    let f = move || f.take().unwrap()();
+
+    // Allocate it on the heap and erase the `'env` bound.
+    let f: Box<FnMut() -> T + Send + 'env> = Box::new(f);
+    let f: Box<FnMut() -> T + Send + 'static> = mem::transmute(f);
+
+    // Finally, spawn the closure.
+    let mut f = f;
+    builder.spawn(move || f())
 }
 
 /// Creates a new `Scope` for [*scoped thread spawning*](struct.Scope.html#method.spawn).
@@ -163,42 +169,72 @@ where
 ///
 /// ```
 /// crossbeam_utils::thread::scope(|scope| {
-///     scope.spawn(|| println!("Exiting scope"));
-///     scope.spawn(|| println!("Running child thread in scope"));
+///     scope.spawn(|_| println!("Exiting scope"));
+///     scope.spawn(|_| println!("Running child thread in scope"));
 /// }).unwrap();
 /// ```
 pub fn scope<'env, F, R>(f: F) -> thread::Result<R>
 where
     F: FnOnce(&Scope<'env>) -> R,
 {
+    let (tx, rx) = mpsc::channel();
     let scope = Scope {
-        joins: RefCell::new(Vec::new()),
+        handles: Arc::new(Mutex::new(Vec::new())),
+        chan: tx,
         _marker: PhantomData,
     };
 
     // Execute the scoped function, but catch any panics.
     let result = panic::catch_unwind(panic::AssertUnwindSafe(|| f(&scope)));
+
+    // Wait until all nested scopes are dropped.
+    drop(scope.chan);
+    let _ = rx.recv();
+
     // Join all remaining spawned threads.
-    let mut panics = scope.join_all();
+    let panics: Vec<_> = {
+        let mut handles = scope
+            .handles
+            .lock()
+            .unwrap();
 
-    if panics.is_empty() {
-        result.map_err(|res| Box::new(vec![res]) as _)
-    } else {
-        if let Err(err) = result {
-            panics.reserve(1);
-            panics.insert(0, err);
+        // Filter handles that haven't been joined, join them, and collect errors.
+        let panics = handles
+            .drain(..)
+            .filter_map(|handle| handle.lock().unwrap().take())
+            .filter_map(|handle| handle.join().err())
+            .collect();
+
+        panics
+    };
+
+    // If `f` has panicked, resume unwinding.
+    // If any of the child threads have panicked, return the panic errors.
+    // Otherwise, everything is OK and return the result of `f`.
+    match result {
+        Err(err) => panic::resume_unwind(err),
+        Ok(res) => {
+            if panics.is_empty() {
+                Ok(res)
+            } else {
+                Err(Box::new(panics))
+            }
         }
-
-        Err(Box::new(panics))
     }
 }
 
 pub struct Scope<'env> {
-    /// The list of the thread join jobs.
-    joins: RefCell<Vec<Box<FnBox<thread::Result<()>> + 'env>>>,
-    // !Send + !Sync
-    _marker: PhantomData<*const ()>,
+    /// The list of the thread join handles.
+    handles: Arc<Mutex<Vec<Arc<Mutex<Option<thread::JoinHandle<()>>>>>>>,
+
+    /// Dropping this sender is a signal that the scope has been dropped.
+    chan: mpsc::Sender<()>,
+
+    /// Borrows data with lifetime `'env`.
+    _marker: PhantomData<&'env ()>,
 }
+
+unsafe impl<'env> Sync for Scope<'env> {}
 
 impl<'env> Scope<'env> {
     /// Create a scoped thread.
@@ -211,7 +247,7 @@ impl<'env> Scope<'env> {
     /// [`spawn`]: https://doc.rust-lang.org/std/thread/fn.spawn.html
     pub fn spawn<'scope, F, T>(&'scope self, f: F) -> ScopedJoinHandle<'scope, T>
     where
-        F: FnOnce() -> T,
+        F: FnOnce(&Scope<'env>) -> T,
         F: Send + 'env,
         T: Send + 'env,
     {
@@ -225,16 +261,6 @@ impl<'env> Scope<'env> {
             scope: self,
             builder: thread::Builder::new(),
         }
-    }
-
-    /// Join all remaining threads and return all potential error payloads
-    fn join_all(self) -> Vec<Box<Any + Send + 'static>> {
-        self
-            .joins
-            .into_inner()
-            .into_iter()
-            .filter_map(|join| join.call_box().err())
-            .collect()
     }
 }
 
@@ -268,39 +294,56 @@ impl<'scope, 'env> ScopedThreadBuilder<'scope, 'env> {
     /// Spawns a new thread, and returns a join handle for it.
     pub fn spawn<F, T>(self, f: F) -> io::Result<ScopedJoinHandle<'scope, T>>
     where
-        F: FnOnce() -> T,
+        F: FnOnce(&Scope<'env>) -> T,
         F: Send + 'env,
         T: Send + 'env,
     {
+        // The result of `f` will be stored here.
         let result = Arc::new(Mutex::new(None));
 
-        let join_handle = unsafe {
-            let mut thread_result = Arc::clone(&result);
-            builder_spawn_unchecked(self.builder, move || {
-                *thread_result.lock().unwrap() = Some(f());
-            })
-        }?;
+        // Spawn the thread and grab its join handle and thread handle.
+        let (handle, thread) = {
+            let result = Arc::clone(&result);
 
-        let thread = join_handle.thread().clone();
-        let join_state = JoinState::<T>::new(join_handle, result);
+            // A clone of the scope that will be moved into the new thread.
+            let scope = Scope {
+                handles: Arc::clone(&self.scope.handles),
+                chan: self.scope.chan.clone(),
+                _marker: PhantomData,
+            };
 
-        let handle = ScopedJoinHandle {
-            inner: Arc::new(Mutex::new(Some(join_state))),
-            thread,
-            _marker: PhantomData,
+            // Spawn the thread.
+            let handle = unsafe {
+                builder_spawn_unchecked(self.builder, move || {
+                    // Make sure the scope is inside the closure with the proper `'env` lifetime.
+                    let scope: Scope<'env> = scope;
+
+                    // Run the closure.
+                    let res = f(&scope);
+
+                    // Store the result if the closure didn't panic.
+                    *result.lock().unwrap() = Some(res);
+                })?
+            };
+
+            let thread = handle.thread().clone();
+            let handle = Arc::new(Mutex::new(Some(handle)));
+            (handle, thread)
         };
 
-        let deferred_handle = Arc::clone(&handle.inner);
-        self.scope.joins.borrow_mut().push(Box::new(move || {
-            let state = deferred_handle.lock().unwrap().take();
-            if let Some(state) = state {
-                state.join().map(|_| ())
-            } else {
-                Ok(())
-            }
-        }));
+        // Add the handle to the shared list of join handles.
+        self.scope
+            .handles
+            .lock()
+            .unwrap()
+            .push(Arc::clone(&handle));
 
-        Ok(handle)
+        Ok(ScopedJoinHandle {
+            handle,
+            result,
+            thread,
+            _marker: PhantomData,
+        })
     }
 }
 
@@ -309,8 +352,16 @@ unsafe impl<'scope, T> Sync for ScopedJoinHandle<'scope, T> {}
 
 /// A handle to a scoped thread
 pub struct ScopedJoinHandle<'scope, T: 'scope> {
-    inner: Arc<Mutex<Option<JoinState<T>>>>,
+    /// A join handle to the spawned thread.
+    handle: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
+
+    /// Holds the result of the inner closure.
+    result: Arc<Mutex<Option<T>>>,
+
+    /// A handle to the the spawned thread.
     thread: thread::Thread,
+
+    /// Borrows the parent scope with lifetime `'scope`.
     _marker: PhantomData<&'scope T>,
 }
 
@@ -327,8 +378,23 @@ impl<'scope, T> ScopedJoinHandle<'scope, T> {
     /// This function may panic on some platforms if a thread attempts to join itself or otherwise
     /// may create a deadlock with joining threads.
     pub fn join(self) -> thread::Result<T> {
-        let state = self.inner.lock().unwrap().take();
-        state.unwrap().join()
+        // Take out the handle. The handle will surely be available because the root scope waits
+        // for nested scopes before joining remaining threads.
+        let handle = self
+            .handle
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap();
+
+        // Join the thread and then take the result out of its inner closure.
+        handle.join().map(|()| {
+            self.result
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap()
+        })
     }
 
     /// Gets the underlying [`std::thread::Thread`] handle.
@@ -345,45 +411,15 @@ impl<'scope, T> fmt::Debug for ScopedJoinHandle<'scope, T> {
     }
 }
 
-type ScopedThreadResult<T> = Arc<Mutex<Option<T>>>;
-
-struct JoinState<T> {
-    join_handle: thread::JoinHandle<()>,
-    result: ScopedThreadResult<T>,
-}
-
-impl<T> JoinState<T> {
-    fn new(join_handle: thread::JoinHandle<()>, result: ScopedThreadResult<T>) -> JoinState<T> {
-        JoinState {
-            join_handle,
-            result,
-        }
-    }
-
-    fn join(self) -> thread::Result<T> {
-        let result = self.result;
-        self.join_handle
-            .join()
-            .map(|_| result.lock().unwrap().take().unwrap())
-    }
-}
-
-trait FnBox<T> {
-    fn call_box(self: Box<Self>) -> T;
-}
-
-impl<T, F: FnOnce() -> T> FnBox<T> for F {
-    fn call_box(self: Box<Self>) -> T {
-        (*self)()
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{Scope, scope};
+
+    use std::any::Any;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
-    use std::{thread, time};
+    use std::thread::sleep;
+    use std::time::Duration;
 
     const TIMES: usize = 10;
     const SMALL_STACK_SIZE: usize = 20;
@@ -392,12 +428,12 @@ mod tests {
     fn join() {
         let counter = AtomicUsize::new(0);
         scope(|scope| {
-            let handle = scope.spawn(|| {
+            let handle = scope.spawn(|_| {
                 counter.store(1, Ordering::Relaxed);
             });
             assert!(handle.join().is_ok());
 
-            let panic_handle = scope.spawn(|| {
+            let panic_handle = scope.spawn(|_| {
                 panic!("\"My honey is running out!\", said Pooh.");
             });
             assert!(panic_handle.join().is_err());
@@ -412,7 +448,7 @@ mod tests {
         let counter = AtomicUsize::new(0);
         scope(|scope| {
             for _ in 0..TIMES {
-                scope.spawn(|| {
+                scope.spawn(|_| {
                     counter.fetch_add(1, Ordering::Relaxed);
                 });
             }
@@ -430,7 +466,7 @@ mod tests {
                     .builder()
                     .name(format!("child-{}", i))
                     .stack_size(SMALL_STACK_SIZE)
-                    .spawn(|| {
+                    .spawn(|_| {
                         counter.fetch_add(1, Ordering::Relaxed);
                     })
                     .unwrap();
@@ -444,13 +480,13 @@ mod tests {
     fn counter_panic() {
         let counter = AtomicUsize::new(0);
         let result = scope(|scope| {
-            scope.spawn(|| {
+            scope.spawn(|_| {
                 panic!("\"My honey is running out!\", said Pooh.");
             });
-            thread::sleep(time::Duration::from_millis(100));
+            sleep(Duration::from_millis(100));
 
             for _ in 0..TIMES {
-                scope.spawn(|| {
+                scope.spawn(|_| {
                     counter.fetch_add(1, Ordering::Relaxed);
                 });
             }
@@ -463,10 +499,13 @@ mod tests {
     #[test]
     fn panic_twice() {
         let result = scope(|scope| {
-            scope.spawn(|| {
-                panic!("thread");
+            scope.spawn(|_| {
+                sleep(Duration::from_millis(500));
+                panic!("thread #1");
             });
-            panic!("scope");
+            scope.spawn(|_| {
+                panic!("thread #2");
+            });
         });
 
         let err = result.unwrap_err();
@@ -475,16 +514,16 @@ mod tests {
 
         let first = vec[0].downcast_ref::<&str>().unwrap();
         let second = vec[1].downcast_ref::<&str>().unwrap();
-        assert_eq!("scope", *first);
-        assert_eq!("thread", *second)
+        assert_eq!("thread #1", *first);
+        assert_eq!("thread #2", *second)
     }
 
     #[test]
     fn panic_many() {
         let result = scope(|scope| {
-            scope.spawn(|| panic!("deliberate panic #1"));
-            scope.spawn(|| panic!("deliberate panic #2"));
-            scope.spawn(|| panic!("deliberate panic #3"));
+            scope.spawn(|_| panic!("deliberate panic #1"));
+            scope.spawn(|_| panic!("deliberate panic #2"));
+            scope.spawn(|_| panic!("deliberate panic #3"));
         });
 
         let err = result.unwrap_err();
@@ -501,5 +540,54 @@ mod tests {
                     || *panic == "deliberate panic #3"
             );
         }
+    }
+
+    #[test]
+    fn nesting() {
+        let var = "foo".to_string();
+
+        struct Wrapper<'a> {
+            var: &'a String,
+        }
+
+        impl<'a> Wrapper<'a> {
+            fn recurse(&'a self, scope: &Scope<'a>, depth: usize) {
+                assert_eq!(self.var, "foo");
+
+                if depth > 0 {
+                    scope.spawn(move |scope| {
+                        self.recurse(scope, depth - 1);
+                    });
+                }
+            }
+        }
+
+        let wrapper = Wrapper {
+            var: &var,
+        };
+
+        scope(|scope| {
+            scope.spawn(|scope| {
+                scope.spawn(|scope| {
+                    wrapper.recurse(scope, 5);
+                });
+            });
+        }).unwrap();
+    }
+
+    #[test]
+    fn join_nested() {
+        scope(|scope| {
+            scope.spawn(|scope| {
+                let handle = scope.spawn(|_| {
+                    7
+                });
+
+                sleep(Duration::from_millis(200));
+                handle.join().unwrap();
+            });
+
+            sleep(Duration::from_millis(100));
+        }).unwrap();
     }
 }
