@@ -20,6 +20,53 @@
 //! }).unwrap();
 //! ```
 //!
+//! # Why scoped threads?
+//!
+//! Suppose we wanted to re-write the previous example using plain threads:
+//!
+//! ```ignore
+//! use std::thread;
+//!
+//! let people = vec![
+//!     "Alice".to_string(),
+//!     "Bob".to_string(),
+//!     "Carol".to_string(),
+//! ];
+//!
+//! let mut threads = Vec::new();
+//!
+//! for person in &people {
+//!     threads.push(thread::spawn(move || {
+//!         println!("Hello, {}!", person);
+//!     }));
+//! }
+//!
+//! for thread in threads {
+//!     thread.join().unwrap();
+//! }
+//! ```
+//!
+//! This doesn't work because the borrow checker complains about `people` not living long enough:
+//!
+//! ```text
+//! error[E0597]: `people` does not live long enough
+//!   --> src/main.rs:12:20
+//!    |
+//! 12 |     for person in &people {
+//!    |                    ^^^^^^ borrowed value does not live long enough
+//! ...
+//! 21 | }
+//!    | - borrowed value only lives until here
+//!    |
+//!    = note: borrowed value must be valid for the static lifetime...
+//! ```
+//!
+//! The problem here is that spawned threads are not allowed to borrow variables on stack because
+//! the compiler cannot prove they will be joined before `people` is destroyed.
+//!
+//! Scoped threads are a mechanism to guarantee to the compiler that spawned threads will be joined
+//! before the scope ends.
+//!
 //! # How scoped threads work
 //!
 //! If a variable is borrowed by a thread, the thread must complete before the variable is
