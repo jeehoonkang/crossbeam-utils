@@ -11,6 +11,7 @@ use std::ops::{Deref, DerefMut};
 
 use num_cpus;
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use thread;
 
 use CachePadded;
 
@@ -65,10 +66,7 @@ impl<T> ShardedLock<T> {
     pub fn read(&self) -> ShardedLockReadGuard<T> {
         // Take the current thread index and map it to a shard index. Thread indices will tend to
         // distribute shards among threads equally, thus reducing contention due to read-locking.
-        let current_index = {
-            #[cfg(feature = "use_std")] { ::thread::current_index().unwrap_or(0) }
-            #[cfg(not(feature = "use_std"))] 0
-        };
+        let current_index = thread::current_index().unwrap_or(0);
         let shard_index = current_index & (self.shards.len() - 1);
 
         ShardedLockReadGuard {
