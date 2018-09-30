@@ -5,11 +5,16 @@
 extern crate cfg_if;
 #[cfg(feature = "use_std")]
 extern crate core;
+extern crate parking_lot;
+extern crate num_cpus;
+#[macro_use]
+extern crate lazy_static;
 
 mod cache_padded;
 
 pub mod atomic;
 #[cfg(feature = "use_std")]
 pub mod thread;
+pub mod sync;
 
 pub use cache_padded::CachePadded;
