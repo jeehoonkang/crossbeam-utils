@@ -99,8 +99,12 @@ impl WaitGroup {
 
 impl Drop for WaitGroup {
     fn drop(&mut self) {
-        *self.inner.count.lock() -= 1;
-        self.inner.cvar.notify_all();
+        let mut count = self.inner.count.lock();
+        *count -= 1;
+
+        if *count == 0 {
+            self.inner.cvar.notify_all();
+        }
     }
 }
 
