@@ -89,6 +89,9 @@ use std::panic;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, ThreadId};
 
+type SharedVec<T> = Arc<Mutex<Vec<T>>>;
+type SharedOption<T> = Arc<Mutex<Option<T>>>;
+
 /// Like [`std::thread::spawn`], but without lifetime bounds on the closure.
 ///
 /// [`std::thread::spawn`]: https://doc.rust-lang.org/stable/std/thread/fn.spawn.html
@@ -153,7 +156,7 @@ where
 {
     let (tx, rx) = mpsc::channel();
     let scope = Scope {
-        handles: Arc::new(Mutex::new(Vec::new())),
+        handles: SharedVec::default(),
         chan: tx,
         _marker: PhantomData,
     };
@@ -199,7 +202,7 @@ where
 
 pub struct Scope<'env> {
     /// The list of the thread join handles.
-    handles: Arc<Mutex<Vec<Arc<Mutex<Option<thread::JoinHandle<()>>>>>>>,
+    handles: SharedVec<SharedOption<thread::JoinHandle<()>>>,
 
     /// Dropping this sender is a signal that the scope has been dropped.
     chan: mpsc::Sender<()>,
@@ -273,7 +276,7 @@ impl<'scope, 'env> ScopedThreadBuilder<'scope, 'env> {
         T: Send + 'env,
     {
         // The result of `f` will be stored here.
-        let result = Arc::new(Mutex::new(None));
+        let result = SharedOption::default();
 
         // Spawn the thread and grab its join handle and thread handle.
         let (handle, thread) = {
@@ -327,10 +330,10 @@ unsafe impl<'scope, T> Sync for ScopedJoinHandle<'scope, T> {}
 /// A handle to a scoped thread
 pub struct ScopedJoinHandle<'scope, T: 'scope> {
     /// A join handle to the spawned thread.
-    handle: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
+    handle: SharedOption<thread::JoinHandle<()>>,
 
     /// Holds the result of the inner closure.
-    result: Arc<Mutex<Option<T>>>,
+    result: SharedOption<T>,
 
     /// A handle to the the spawned thread.
     thread: thread::Thread,
