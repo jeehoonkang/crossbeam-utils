@@ -86,8 +86,10 @@ use std::io;
 use std::marker::PhantomData;
 use std::mem;
 use std::panic;
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, ThreadId};
+
+use sync::WaitGroup;
 
 type SharedVec<T> = Arc<Mutex<Vec<T>>>;
 type SharedOption<T> = Arc<Mutex<Option<T>>>;
@@ -115,10 +117,9 @@ pub fn scope<'env, F, R>(f: F) -> thread::Result<R>
 where
     F: FnOnce(&Scope<'env>) -> R,
 {
-    let (tx, rx) = mpsc::channel();
     let scope = Scope {
         handles: SharedVec::default(),
-        chan: tx,
+        wg: WaitGroup::new(),
         _marker: PhantomData,
     };
 
@@ -126,8 +127,7 @@ where
     let result = panic::catch_unwind(panic::AssertUnwindSafe(|| f(&scope)));
 
     // Wait until all nested scopes are dropped.
-    drop(scope.chan);
-    let _ = rx.recv();
+    scope.wg.wait();
 
     // Join all remaining spawned threads.
     let panics: Vec<_> = {
@@ -165,8 +165,8 @@ pub struct Scope<'env> {
     /// The list of the thread join handles.
     handles: SharedVec<SharedOption<thread::JoinHandle<()>>>,
 
-    /// Dropping this sender is a signal that the scope has been dropped.
-    chan: mpsc::Sender<()>,
+    /// Used to wait until all subscopes all dropped.
+    wg: WaitGroup,
 
     /// Borrows data with lifetime `'env`.
     _marker: PhantomData<&'env ()>,
@@ -246,7 +246,7 @@ impl<'scope, 'env> ScopedThreadBuilder<'scope, 'env> {
             // A clone of the scope that will be moved into the new thread.
             let scope = Scope {
                 handles: Arc::clone(&self.scope.handles),
-                chan: self.scope.chan.clone(),
+                wg: self.scope.wg.clone(),
                 _marker: PhantomData,
             };
 
