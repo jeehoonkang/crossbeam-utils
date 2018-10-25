@@ -36,7 +36,7 @@
 //! let mut threads = Vec::new();
 //!
 //! for person in &people {
-//!     threads.push(thread::spawn(move || {
+//!     threads.push(thread::spawn(move |_| {
 //!         println!("Hello, {}!", person);
 //!     }));
 //! }
@@ -91,45 +91,6 @@ use std::thread::{self, ThreadId};
 
 type SharedVec<T> = Arc<Mutex<Vec<T>>>;
 type SharedOption<T> = Arc<Mutex<Option<T>>>;
-
-/// Like [`std::thread::spawn`], but without lifetime bounds on the closure.
-///
-/// [`std::thread::spawn`]: https://doc.rust-lang.org/stable/std/thread/fn.spawn.html
-pub unsafe fn spawn_unchecked<'env, F, T>(f: F) -> thread::JoinHandle<T>
-where
-    F: FnOnce() -> T,
-    F: Send + 'env,
-    T: Send + 'static,
-{
-    let builder = thread::Builder::new();
-    builder_spawn_unchecked(builder, f).unwrap()
-}
-
-/// Like [`std::thread::Builder::spawn`], but without lifetime bounds on the closure.
-///
-/// [`std::thread::Builder::spawn`]:
-///     https://doc.rust-lang.org/nightly/std/thread/struct.Builder.html#method.spawn
-pub unsafe fn builder_spawn_unchecked<'env, F, T>(
-    builder: thread::Builder,
-    f: F,
-) -> io::Result<thread::JoinHandle<T>>
-where
-    F: FnOnce() -> T,
-    F: Send + 'env,
-    T: Send + 'static,
-{
-    // Change the type of `f` from `FnOnce() -> T` to `FnMut() -> T`.
-    let mut f = Some(f);
-    let f = move || f.take().unwrap()();
-
-    // Allocate it on the heap and erase the `'env` bound.
-    let f: Box<FnMut() -> T + Send + 'env> = Box::new(f);
-    let f: Box<FnMut() -> T + Send + 'static> = mem::transmute(f);
-
-    // Finally, spawn the closure.
-    let mut f = f;
-    builder.spawn(move || f())
-}
 
 /// Creates a new `Scope` for [*scoped thread spawning*](struct.Scope.html#method.spawn).
 ///
@@ -290,8 +251,8 @@ impl<'scope, 'env> ScopedThreadBuilder<'scope, 'env> {
             };
 
             // Spawn the thread.
-            let handle = unsafe {
-                builder_spawn_unchecked(self.builder, move || {
+            let handle = {
+                let closure = move || {
                     // Make sure the scope is inside the closure with the proper `'env` lifetime.
                     let scope: Scope<'env> = scope;
 
@@ -300,7 +261,21 @@ impl<'scope, 'env> ScopedThreadBuilder<'scope, 'env> {
 
                     // Store the result if the closure didn't panic.
                     *result.lock().unwrap() = Some(res);
-                })?
+                };
+
+                // Change the type of `closure` from `FnOnce() -> T` to `FnMut() -> T`.
+                let mut closure = Some(closure);
+                let closure = move || closure.take().unwrap()();
+
+                // Allocate `clsoure` on the heap and erase the `'env` bound.
+                let closure: Box<FnMut() + Send + 'env> = Box::new(closure);
+                let closure: Box<FnMut() + Send + 'static> = unsafe {
+                    mem::transmute(closure)
+                };
+
+                // Finally, spawn the closure.
+                let mut closure = closure;
+                self.builder.spawn(move || closure())?
             };
 
             let thread = handle.thread().clone();
