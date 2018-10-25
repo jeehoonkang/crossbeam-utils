@@ -80,14 +80,13 @@
 //!
 //! [`std::thread::spawn`]: https://doc.rust-lang.org/std/thread/fn.spawn.html
 
-use std::collections::HashMap;
 use std::fmt;
 use std::io;
 use std::marker::PhantomData;
 use std::mem;
 use std::panic;
 use std::sync::{Arc, Mutex};
-use std::thread::{self, ThreadId};
+use std::thread;
 
 use sync::WaitGroup;
 
@@ -361,74 +360,4 @@ impl<'scope, T> fmt::Debug for ScopedJoinHandle<'scope, T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "ScopedJoinHandle {{ ... }}")
     }
-}
-
-/// Returns a `usize` that identifies the current thread.
-///
-/// Each thread is associated with an 'index'. While there are no particular guarantees, indices
-/// usually tend to be consecutive numbers between 0 and the number of running threads.
-///
-/// Since this function accesses TLS, `None` might be returned if the current thread's TLS is
-/// tearing down.
-#[inline]
-pub fn current_index() -> Option<usize> {
-    REGISTRATION.try_with(|reg| reg.index).ok()
-}
-
-/// The global registry keeping track of registered threads and indices.
-struct ThreadIndices {
-    /// Mapping from `ThreadId` to thread index.
-    mapping: HashMap<ThreadId, usize>,
-
-    /// A list of free indices.
-    free_list: Vec<usize>,
-
-    /// The next index to allocate if the free list is empty.
-    next_index: usize,
-}
-
-lazy_static! {
-    static ref THREAD_INDICES: Mutex<ThreadIndices> = Mutex::new(ThreadIndices {
-        mapping: HashMap::new(),
-        free_list: Vec::new(),
-        next_index: 0,
-    });
-}
-
-/// A registration of a thread with an index.
-///
-/// When dropped, unregisters the thread and frees the reserved index.
-struct Registration {
-    index: usize,
-    thread_id: ThreadId,
-}
-
-impl Drop for Registration {
-    fn drop(&mut self) {
-        let mut indices = THREAD_INDICES.lock().unwrap();
-        indices.mapping.remove(&self.thread_id);
-        indices.free_list.push(self.index);
-    }
-}
-
-thread_local! {
-    static REGISTRATION: Registration = {
-        let thread_id = thread::current().id();
-        let mut indices = THREAD_INDICES.lock().unwrap();
-
-        let index = match indices.free_list.pop() {
-            Some(i) => i,
-            None => {
-                let i = indices.next_index;
-                indices.next_index += 1;
-                i
-            }
-        };
-        indices.mapping.insert(thread_id, index);
-
-        Registration {
-            index,
-            thread_id,
-        }
-    };
 }
